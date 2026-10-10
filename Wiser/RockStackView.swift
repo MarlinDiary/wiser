@@ -9,6 +9,7 @@ import SwiftUI
 
 struct RockStackView: View {
     var state: RockState
+    var shadowColor: Color = .black
     @State private var visualState: RockState? = nil
     @State private var isBouncing = false
     @State private var animationDuration: Double = 0.75
@@ -39,6 +40,8 @@ struct RockStackView: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
+            groundShadow
+
             RockBottomView(state: displayState)
                 .padding(.bottom, bottomPadding)
 
@@ -70,6 +73,26 @@ struct RockStackView: View {
                 }
             }
         }
+    }
+
+    /// Soft light from above: a faint shadow right under the bottom stone,
+    /// a little denser in the middle where the stone is closest to the ground.
+    private var groundShadow: some View {
+        ZStack {
+            Ellipse()
+                .fill(shadowColor)
+                .frame(width: 240, height: 32)
+                .blur(radius: 14)
+                .opacity(0.07)
+                .offset(y: 3)
+            Ellipse()
+                .fill(shadowColor)
+                .frame(width: 170, height: 14)
+                .blur(radius: 6)
+                .opacity(0.09)
+                .offset(y: 2)
+        }
+        .frame(height: 0)
     }
 }
 

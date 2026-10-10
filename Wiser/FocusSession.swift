@@ -39,3 +39,12 @@ final class FocusSession {
         return sessions
     }
 }
+
+/// "45m", "2h", "1h 15m"
+func formatFocusTime(minutes: Int) -> String {
+    let hours = minutes / 60
+    let rest = minutes % 60
+    if hours == 0 { return "\(rest)m" }
+    if rest == 0 { return "\(hours)h" }
+    return "\(hours)h \(rest)m"
+}

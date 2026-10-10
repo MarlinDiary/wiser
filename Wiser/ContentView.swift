@@ -14,25 +14,13 @@ struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
-    @Query private var allSessions: [FocusSession]
     @State private var locationManager = LocationManager()
-    @State var greetingProvider = GreetingProvider()
+    @State var skyProvider = SkyProvider()
     @State private var focusTimer = FocusTimer()
     @State private var isMusicOn = false
     @State private var isBrightScreen = false
     @State private var showStats = false
     @State private var showHistory = false
-
-    private var todayMinutes: Int {
-        let startOfDay = Calendar.current.startOfDay(for: Date())
-        return allSessions
-            .filter { $0.startDate >= startOfDay }
-            .reduce(0) { $0 + $1.durationMinutes }
-    }
-
-    var backgroundColor: Color {
-        Color(.secondarySystemBackground)
-    }
 
     private var focusDisplay: String {
         let totalSeconds = Int(focusTimer.elapsedSeconds)
@@ -46,26 +34,11 @@ struct ContentView: View {
         }
     }
 
-    private func formattedDuration(totalMinutes: Int) -> String {
-        let hours = totalMinutes / 60
-        let minutes = totalMinutes % 60
-        if hours == 0 {
-            return "\(minutes) min"
-        } else if minutes == 0 {
-            return "\(hours) hr"
-        } else {
-            return "\(hours)hr \(minutes)min"
-        }
-    }
-
     var body: some View {
         ZStack {
-            backgroundColor
-                .ignoresSafeArea()
-            Image("NoiseTexture")
-                .resizable(resizingMode: .tile)
-                .ignoresSafeArea()
-                .opacity(colorScheme == .dark ? 0.05 : 1)
+            TimelineView(.everyMinute) { context in
+                AmbientBackground(tint: skyProvider.sky(at: context.date))
+            }
             VStack {
                 HStack {
                     Button(action: {
@@ -101,23 +74,27 @@ struct ContentView: View {
                     .padding(.trailing, 16)
                 }
                 Spacer()
-                Label(greetingProvider.greeting, systemImage: greetingProvider.displaySymbol)
-                    .contentTransition(.symbolEffect(.replace))
-                    .font(.system(.subheadline, design: .rounded))
-                    .foregroundStyle(greetingProvider.greetingColor)
-                    .padding(.bottom, 16)
-                    .opacity(focusTimer.isRunning ? 0 : 1)
-                    .animation(.easeInOut(duration: 0.3), value: focusTimer.isRunning)
-                RockStackView(state: focusTimer.isRunning ? (focusTimer.isPaused ? .paused : .checked) : .idle)
-                    .scaleEffect(0.66)
-                    .frame(height: 364 * 0.66)
-                    .padding(.bottom, 16)
-                Text(focusDisplay)
-                    .font(.system(size: 48, weight: .medium, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(.primary)
-                    .contentTransition(.numericText())
-                    .animation(.linear(duration: 0.3), value: focusDisplay)
+                TimelineView(.everyMinute) { context in
+                    let tint = skyProvider.sky(at: context.date)
+                    // The stones keep their shading but take on the hue of the sky.
+                    RockStackView(state: focusTimer.isRunning ? (focusTimer.isPaused ? .paused : .checked) : .idle,
+                                  shadowColor: colorScheme == .dark ? .black : tint.mix(with: .black, by: 0.6))
+                        .colorEffect(ShaderLibrary.tintKeepingLuminance(
+                            .color(tint),
+                            .float(0.15)
+                        ))
+                }
+                .scaleEffect(0.66)
+                .frame(height: 364 * 0.66)
+                .padding(.bottom, 16)
+                TimelineView(.everyMinute) { context in
+                    Text(focusDisplay)
+                        .font(.system(size: 48, weight: .medium, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(skyProvider.sky(at: context.date).ink(for: colorScheme))
+                        .contentTransition(.numericText())
+                        .animation(.linear(duration: 0.3), value: focusDisplay)
+                }
                 Spacer()
                 ZStack {
                     Button(action: {
@@ -130,7 +107,7 @@ struct ContentView: View {
                             isMusicOn = false
                             isBrightScreen = false
                             if let location = locationManager.location {
-                                Task { await greetingProvider.fetchWeather(for: location) }
+                                Task { await skyProvider.fetchWeather(for: location) }
                             }
                         } else {
                             focusTimer.start()
@@ -192,18 +169,18 @@ struct ContentView: View {
         }
         .task(id: locationManager.location?.coordinate.latitude) {
             guard let location = locationManager.location else { return }
-            await greetingProvider.fetchWeather(for: location)
+            await skyProvider.fetchWeather(for: location)
         }
         .onReceive(Timer.publish(every: 30 * 60, on: .main, in: .common).autoconnect()) { _ in
             if let location = locationManager.location {
-                Task { await greetingProvider.fetchWeather(for: location) }
+                Task { await skyProvider.fetchWeather(for: location) }
             }
         }
         .sheet(isPresented: $showStats) {
-            StatsView()
+            StatsView(tint: skyProvider.sky(at: .now))
         }
         .sheet(isPresented: $showHistory) {
-            HistoryView()
+            HistoryView(tint: skyProvider.sky(at: .now))
         }
     }
 }
@@ -211,24 +188,24 @@ struct ContentView: View {
 #Preview("Morning") {
     let container = try! ModelContainer(for: FocusSession.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))
     SampleData.insert(into: container.mainContext)
-    return ContentView(greetingProvider: GreetingProvider(preview: "Good morning", symbol: "sun.max"))
+    return ContentView(skyProvider: SkyProvider(time: DateComponents(hour: 8)))
         .modelContainer(container)
 }
 
 #Preview("Afternoon") {
     let container = try! ModelContainer(for: FocusSession.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))
-    return ContentView(greetingProvider: GreetingProvider(preview: "Good afternoon", symbol: "cloud.sun.fill"))
+    return ContentView(skyProvider: SkyProvider(time: DateComponents(hour: 17, minute: 50)))
         .modelContainer(container)
 }
 
 #Preview("Evening") {
     let container = try! ModelContainer(for: FocusSession.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))
-    return ContentView(greetingProvider: GreetingProvider(preview: "Good evening", symbol: "sun.horizon.fill"))
+    return ContentView(skyProvider: SkyProvider(time: DateComponents(hour: 19, minute: 10)))
         .modelContainer(container)
 }
 
 #Preview("Night") {
     let container = try! ModelContainer(for: FocusSession.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))
-    return ContentView(greetingProvider: GreetingProvider(preview: "Good night", symbol: "moon.stars"))
+    return ContentView(skyProvider: SkyProvider(time: DateComponents(hour: 22)))
         .modelContainer(container)
 }
