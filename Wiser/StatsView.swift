@@ -343,9 +343,11 @@ private struct StatTile: View {
     }
 }
 
+#if DEBUG
 #Preview {
     let container = try! ModelContainer(for: FocusSession.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))
     SampleData.insert(into: container.mainContext)
     return StatsView(tint: SkyProvider().sky(at: .now))
         .modelContainer(container)
 }
+#endif

@@ -185,12 +185,14 @@ struct ContentView: View {
     }
 }
 
+#if DEBUG
 #Preview("Morning") {
     let container = try! ModelContainer(for: FocusSession.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))
     SampleData.insert(into: container.mainContext)
     return ContentView(skyProvider: SkyProvider(time: DateComponents(hour: 8)))
         .modelContainer(container)
 }
+#endif
 
 #Preview("Afternoon") {
     let container = try! ModelContainer(for: FocusSession.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))
