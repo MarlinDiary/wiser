@@ -51,7 +51,7 @@ final class FocusTimer {
     }
 
     func stop() -> (startDate: Date, duration: TimeInterval)? {
-        guard let sessionStart = sessionStartDate else { return nil }
+        let sessionStart = sessionStartDate
         let finalDuration = elapsedSeconds
         isRunning = false
         isPaused = false
@@ -62,6 +62,7 @@ final class FocusTimer {
         accumulatedBeforePause = 0
         elapsedSeconds = 0
         clearSaved()
+        guard let sessionStart else { return nil }
         return (sessionStart, finalDuration)
     }
 
@@ -124,10 +125,15 @@ final class FocusTimer {
 
     private func restore() {
         guard defaults.bool(forKey: Keys.isRunning) else { return }
+        // A session saved without its start date can't be resumed or stopped; drop it.
+        guard let savedSessionStart = defaults.object(forKey: Keys.sessionStartDate) as? Date else {
+            clearSaved()
+            return
+        }
 
         isRunning = true
         isPaused = defaults.bool(forKey: Keys.isPaused)
-        sessionStartDate = defaults.object(forKey: Keys.sessionStartDate) as? Date
+        sessionStartDate = savedSessionStart
         startDate = defaults.object(forKey: Keys.startDate) as? Date
         accumulatedBeforePause = defaults.double(forKey: Keys.accumulated)
 
