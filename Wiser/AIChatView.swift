@@ -11,17 +11,22 @@ import SwiftData
 /// AI to talk to about the user's focus, as long as they like, with their own OpenAI API key (user, 2026-11-01:
 /// "应该是让用户自己填API key最好"): Cue's conversation, brought over. Until a key is in, what it takes and where the
 /// questions go.
-@available(iOS 27.1, *)
 struct AIChatView<Background: View>: View {
     var tint: Color
+    /// Whether the page shows its title: as a sheet it does; as a tab, the tab says which page this is.
+    var titled = false
+    /// The session under way, if there is one, for AI to know of as it's asked.
+    var running: () -> FocusTimer.Running?
     /// What the page stands on.
     @ViewBuilder var background: () -> Background
     @State private var hasKey = OpenAIKey.value != nil
 
     var body: some View {
-        Group {
+        let page = Group {
             if hasKey {
-                Conversation(hasKey: $hasKey)
+                VerticalBarAware { barsRunDown in
+                    Conversation(hasKey: $hasKey, barsRunDown: barsRunDown, running: running)
+                }
             } else {
                 KeySetup(tint: tint, hasKey: $hasKey)
             }
@@ -31,19 +36,23 @@ struct AIChatView<Background: View>: View {
         }
         .navigationTitle("Ask AI")
         .navigationBarTitleDisplayMode(.inline)
-        // The tab says which page this is; the title stays for VoiceOver.
-        .toolbar(removing: .title)
+        if titled {
+            page
+        } else {
+            // The title stays for VoiceOver.
+            page.toolbar(removing: .title)
+        }
     }
 }
 
 /// The conversation: the user's questions on the right, AI's answers the width of the page. A question goes up to the
 /// top of the screen as it is sent, and the answer is written under it, the conversation not following it down, as in
 /// Cue and in ChatGPT's app: an answer can be read from its first line however fast it comes.
-@available(iOS 27.1, *)
 private struct Conversation: View {
     @Binding var hasKey: Bool
-    /// Where the bars run down the side of the screen, as on iPhone Duo's cover screen.
-    @Environment(\.toolbarVerticalEdge) private var verticalBars
+    /// Whether the bars run down the side of the screen, as on iPhone Duo's cover screen.
+    var barsRunDown: Bool
+    var running: () -> FocusTimer.Running?
     @Query(sort: \FocusSession.startDate) private var sessions: [FocusSession]
     @State private var position = ScrollPosition(idType: Chat.Message.ID.self)
     /// The question last asked since the page was opened. It and what follows take at least the screen between the
@@ -227,10 +236,11 @@ private struct Conversation: View {
     /// Asks the question and lifts it to the top. The keyboard goes, so the answer has the screen, as in Cue.
     private func send(_ text: String) {
         let question = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !question.isEmpty, !chat.answering else { return }
+        guard !question.isEmpty, !chat.answering,
+              let id = chat.send(question, records: FocusRecords.lines(sessions, running: running())) else { return }
+        // Only once it's gone: a question that couldn't be sent stays in the field.
         draft.wrappedValue = ""
         focused = false
-        guard let id = chat.send(question, records: FocusRecords.lines(sessions)) else { return }
         asked = id
         // An update after the question and its room are in: sent in the same one, the rise found nowhere to go.
         DispatchQueue.main.async {
@@ -242,11 +252,11 @@ private struct Conversation: View {
     /// as they are, concentric with its corners: its foot level with the tabs', as Safari keeps its address there.
     /// Elsewhere, above the tabs, as iOS's own bottom field.
     private var sideInset: CGFloat {
-        verticalBars != nil ? Self.columnInset : ChatBar.inset
+        barsRunDown ? Self.columnInset : ChatBar.inset
     }
 
     private var bottomInset: CGFloat {
-        verticalBars != nil ? Self.columnInset - safeBottom : ChatBar.insetOverKeyboard
+        barsRunDown ? Self.columnInset - safeBottom : ChatBar.insetOverKeyboard
     }
 
     /// How far in from the screen's edges the bars down its side sit (measured on iPhone Duo's cover screen).
@@ -405,7 +415,8 @@ private struct KeySetup: View {
 }
 
 /// The key in use: put another in, or take it out.
-private struct KeySheet: View {
+/// Putting in a key, a new one, or taking it out: from the AI page, and from Settings.
+struct KeySheet: View {
     @Binding var hasKey: Bool
     @Environment(\.dismiss) private var dismiss
     @State private var key = ""
@@ -415,26 +426,30 @@ private struct KeySheet: View {
         NavigationStack {
             Form {
                 Section {
-                    LabeledContent("In use", value: "••••" + String((OpenAIKey.value ?? "").suffix(4)))
-                    SecureField("New key", text: $key)
+                    if hasKey {
+                        LabeledContent("In use", value: "••••" + String((OpenAIKey.value ?? "").suffix(4)))
+                    }
+                    SecureField(hasKey ? "New key" : "OpenAI API key", text: $key)
                         .textContentType(.password)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                 } footer: {
                     Text("Your questions and your focus records go to OpenAI with your key, and OpenAI bills your account for them. The key stays on this iPhone.")
                 }
-                Section {
-                    Button("Remove Key", role: .destructive) { confirmingRemove = true }
-                        .confirmationDialog("Remove Key", isPresented: $confirmingRemove, titleVisibility: .hidden) {
-                            Button("Remove Key", role: .destructive) {
-                                FocusChat.shared.stop()
-                                OpenAIKey.set("")
-                                hasKey = false
-                                dismiss()
+                if hasKey {
+                    Section {
+                        Button("Remove Key", role: .destructive) { confirmingRemove = true }
+                            .confirmationDialog("Remove Key", isPresented: $confirmingRemove, titleVisibility: .hidden) {
+                                Button("Remove Key", role: .destructive) {
+                                    FocusChat.shared.stop()
+                                    OpenAIKey.set("")
+                                    hasKey = false
+                                    dismiss()
+                                }
+                            } message: {
+                                Text("AI can't answer until you put a key in again.")
                             }
-                        } message: {
-                            Text("AI can't answer until you put a key in again.")
-                        }
+                    }
                 }
             }
             .navigationTitle("OpenAI API Key")
@@ -446,6 +461,7 @@ private struct KeySheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button(role: .confirm) {
                         OpenAIKey.set(key)
+                        hasKey = OpenAIKey.value != nil
                         dismiss()
                     }
                     .disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)

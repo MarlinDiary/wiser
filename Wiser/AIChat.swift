@@ -99,6 +99,10 @@ final class FocusChat {
                 }
                 #endif
                 try await ChatClient.stream(history, instructions: ChatClient.instructions(records), key: key, onDelta: onDelta)
+                // An answer that came back with nothing in it says so, rather than leaving the question hanging.
+                if let last = messages.last, last.role == .assistant, last.text.isEmpty {
+                    failure = String(localized: "AI didn’t answer.")
+                }
             } catch is CancellationError {
             } catch let error as URLError where error.code == .cancelled {
             } catch {
@@ -163,7 +167,8 @@ nonisolated enum ChatClient {
             try Task.checkCancellation()
             guard let event = EventStream.event(from: line) else { continue }
             switch event["type"] as? String {
-            case "response.output_text.delta":
+            // A refusal comes as words of its own, and is the answer.
+            case "response.output_text.delta", "response.refusal.delta":
                 if let delta = event["delta"] as? String { await onDelta(delta) }
             case "response.completed":
                 return
@@ -235,10 +240,12 @@ extension ChatClient {
 }
 #endif
 
-/// What AI knows of the user's focus going into the conversation, as lines: today and the periods around it, every day
-/// with focus in the last four weeks and its sessions, the months before, and the hours of the day it falls in.
+/// What AI knows of the user's focus going into the conversation, as lines: the session under way, if one is, today and
+/// the periods around it, every day with focus in the last four weeks and its sessions, the months before, and the
+/// hours of the day it falls in.
 enum FocusRecords {
-    static func lines(_ sessions: [FocusSession], now: Date = .now, calendar: Calendar = .current) -> [String] {
+    static func lines(_ sessions: [FocusSession], running: FocusTimer.Running? = nil, now: Date = .now,
+                      calendar: Calendar = .current) -> [String] {
         let english = Locale(identifier: "en_US_POSIX")
         func formatted(_ date: Date, _ format: String) -> String {
             let formatter = DateFormatter()
@@ -264,20 +271,24 @@ enum FocusRecords {
         }
 
         var lines = ["Now: \(formatted(now, "EEEE d MMMM yyyy, HH:mm")) (\(calendar.timeZone.identifier))"]
+        if let running {
+            lines.append("A session is under way, not yet in the records below: started \(formatted(running.start, "EEE HH:mm")), "
+                + "\(formatFocusTime(minutes: Int(running.focused) / 60)) focused so far\(running.isPaused ? ", paused now" : "")")
+        }
         guard let first = sessions.min(by: { $0.startDate < $1.startDate }) else {
             lines.append("No focus sessions recorded yet.")
             return lines
         }
 
         let today = period(.day, 0)
-        let todays = sessions.filter { today.contains($0.startDate) }
+        let todays = sessions.filter { today.contains($0.startDate) }.parts
         lines.append("Today: \(total(today)) in \(todays.count) session\(todays.count == 1 ? "" : "s")")
         lines.append("Yesterday: \(total(period(.day, -1)))")
         let week = period(.weekOfYear, 0)
         lines.append("This week (from \(formatted(week.start, "EEE d MMM"))): \(total(week)); last week: \(total(period(.weekOfYear, -1)))")
         lines.append("This month: \(total(period(.month, 0))); last month: \(total(period(.month, -1)))")
-        let all = sessions.reduce(0) { $0 + $1.durationMinutes }
-        lines.append("Since the first session on \(formatted(first.startDate, "d MMM yyyy")): \(formatFocusTime(minutes: all)) in \(sessions.count) sessions")
+        let all = Int(sessions.reduce(0) { $0 + $1.durationSeconds }) / 60
+        lines.append("Since the first session on \(formatted(first.startDate, "d MMM yyyy")): \(formatFocusTime(minutes: all)) in \(sessions.parts.count) sessions")
 
         // Days in a row with focus, up to today, or up to yesterday while today has none yet.
         var streak = 0
@@ -295,9 +306,8 @@ enum FocusRecords {
             let end = calendar.date(byAdding: .day, value: 1, to: start)!
             let focused = minutes(start, end)
             guard focused > 0 else { continue }
-            let pieces = sessions.filter { start <= $0.startDate && $0.startDate < end }
-                .sorted { $0.startDate < $1.startDate }
-                .map { "\(formatted($0.startDate, "HH:mm")) \(formatFocusTime(minutes: $0.durationMinutes))" }
+            let pieces = sessions.filter { start <= $0.startDate && $0.startDate < end }.parts
+                .map { "\(formatted($0.start, "HH:mm")) \(formatFocusTime(minutes: $0.minutes))" }
             lines.append("\(formatted(start, "yyyy-MM-dd EEE")): \(formatFocusTime(minutes: focused)) (\(pieces.joined(separator: ", ")))")
         }
 

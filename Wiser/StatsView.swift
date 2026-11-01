@@ -167,78 +167,82 @@ struct StatsView: View {
         let previous = interval(offset: offset - 1)
         let data = chartData(in: current)
         let totalMinutes = focusSeconds(from: current.start, to: current.end) / 60
-        let sessions = allSessions.filter { $0.startDate >= current.start && $0.startDate < current.end }
+        let sessions = allSessions.filter { $0.startDate >= current.start && $0.startDate < current.end }.parts
         let average = selectedPeriod == .day ? nil : Double(totalMinutes) / Double(elapsedBuckets(in: current))
         let selected = selectedEntry(in: data)
 
-        VStack(spacing: 20) {
-            Picker("Period", selection: $selectedPeriod) {
-                ForEach(StatsPeriod.allCases, id: \.self) { period in
-                    Text(period.rawValue).tag(period)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            HStack {
-                Button {
-                    offset -= 1
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .frame(width: 44, height: 44)
-                }
-                Spacer()
-                Text(periodTitle)
-                    .font(.system(.headline, design: .rounded))
-                    .contentTransition(.numericText())
-                Spacer()
-                Button {
-                    offset += 1
-                } label: {
-                    Image(systemName: "chevron.right")
-                        .frame(width: 44, height: 44)
-                }
-                .disabled(offset >= 0)
-                .opacity(offset >= 0 ? 0.25 : 1)
-            }
-            .font(.system(size: 15, weight: .semibold))
-            .foregroundStyle(ink)
-            .padding(.top, -8)
-
-            VStack(spacing: 6) {
-                Text(formatFocusTime(minutes: selected?.minutes ?? totalMinutes))
-                    .font(.system(size: 44, weight: .semibold, design: .rounded))
-                    .foregroundStyle(ink)
-                    .contentTransition(.numericText())
-                Text(selected.map { detailLabel(for: $0) } ?? summary(totalMinutes: totalMinutes, average: average, previous: previous))
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-
-            chart(data, average: average, selected: selected)
-                .frame(height: 280)
-                .overlay {
-                    if totalMinutes == 0 {
-                        Text("No focus yet")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+        // In a scroll, for a screen too short for it all, as on its side; one tall enough doesn't move.
+        ScrollView {
+            VStack(spacing: 20) {
+                Picker("Period", selection: $selectedPeriod) {
+                    ForEach(StatsPeriod.allCases, id: \.self) { period in
+                        Text(period.rawValue).tag(period)
                     }
                 }
+                .pickerStyle(.segmented)
 
-            Grid(horizontalSpacing: 12, verticalSpacing: 12) {
-                GridRow {
-                    StatTile(title: "Sessions", value: sessions.isEmpty ? "—" : "\(sessions.count)")
-                    StatTile(title: "Longest", value: sessions.map(\.durationMinutes).max().map { formatFocusTime(minutes: $0) } ?? "—")
+                HStack {
+                    Button {
+                        offset -= 1
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .frame(width: 44, height: 44)
+                    }
+                    Spacer()
+                    Text(periodTitle)
+                        .font(.system(.headline, design: .rounded))
+                        .contentTransition(.numericText())
+                    Spacer()
+                    Button {
+                        offset += 1
+                    } label: {
+                        Image(systemName: "chevron.right")
+                            .frame(width: 44, height: 44)
+                    }
+                    .disabled(offset >= 0)
+                    .opacity(offset >= 0 ? 0.25 : 1)
                 }
-                GridRow {
-                    StatTile(title: "Average", value: sessions.isEmpty ? "—" : formatFocusTime(minutes: sessions.reduce(0) { $0 + $1.durationMinutes } / sessions.count))
-                    StatTile(title: "Peak", value: data.filter { $0.minutes > 0 }.max { $0.minutes < $1.minutes }.map { detailLabel(for: $0) } ?? "—")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(ink)
+                .padding(.top, -8)
+
+                VStack(spacing: 6) {
+                    Text(formatFocusTime(minutes: selected?.minutes ?? totalMinutes))
+                        .font(.system(size: 44, weight: .semibold, design: .rounded))
+                        .foregroundStyle(ink)
+                        .contentTransition(.numericText())
+                    Text(selected.map { detailLabel(for: $0) } ?? summary(totalMinutes: totalMinutes, average: average, previous: previous))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                chart(data, average: average, selected: selected)
+                    .frame(height: 280)
+                    .overlay {
+                        if totalMinutes == 0 {
+                            Text("No focus yet")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                Grid(horizontalSpacing: 12, verticalSpacing: 12) {
+                    GridRow {
+                        StatTile(title: "Sessions", value: sessions.isEmpty ? "—" : "\(sessions.count)")
+                        StatTile(title: "Longest", value: sessions.map(\.minutes).max().map { formatFocusTime(minutes: $0) } ?? "—")
+                    }
+                    GridRow {
+                        StatTile(title: "Average", value: sessions.isEmpty ? "—" : formatFocusTime(minutes: sessions.reduce(0) { $0 + $1.minutes } / sessions.count))
+                        StatTile(title: "Peak", value: data.filter { $0.minutes > 0 }.max { $0.minutes < $1.minutes }.map { detailLabel(for: $0) } ?? "—")
+                    }
                 }
             }
-
-            Spacer(minLength: 0)
+            .padding(.horizontal, 20)
+            .padding(.top, 28)
+            .padding(.bottom, 20)
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 28)
+        .scrollBounceBehavior(.basedOnSize)
+        .scrollIndicators(.hidden)
         .animation(.easeInOut(duration: 0.3), value: offset)
         .animation(.easeInOut(duration: 0.3), value: selectedPeriod)
         .onChange(of: selectedPeriod) {

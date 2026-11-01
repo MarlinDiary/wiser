@@ -5,11 +5,17 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>remote-notification</string>
+		<string>audio</string>
 	</array>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchSky</string>
+	</dict>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Wiser uses your location to work out sunrise and sunset times on your iPhone, so the sky follows your day.</string>
 </dict>

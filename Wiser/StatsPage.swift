@@ -138,10 +138,10 @@ struct StatsPage<Background: View>: View {
         return Grid(horizontalSpacing: 12, verticalSpacing: 12) {
             GridRow {
                 StatTile(title: "Sessions", value: sessions.isEmpty ? "—" : "\(sessions.count)")
-                StatTile(title: "Longest", value: sessions.map(\.durationMinutes).max().map { formatFocusTime(minutes: $0) } ?? "—")
+                StatTile(title: "Longest", value: sessions.map(\.minutes).max().map { formatFocusTime(minutes: $0) } ?? "—")
             }
             GridRow {
-                StatTile(title: "Average", value: sessions.isEmpty ? "—" : formatFocusTime(minutes: sessions.reduce(0) { $0 + $1.durationMinutes } / sessions.count))
+                StatTile(title: "Average", value: sessions.isEmpty ? "—" : formatFocusTime(minutes: sessions.reduce(0) { $0 + $1.minutes } / sessions.count))
                 StatTile(title: "Peak", value: period.buckets.filter { $0.minutes > 0 }.max { $0.minutes < $1.minutes }.map { kind.detailLabel(for: $0) } ?? "—")
             }
         }
@@ -163,12 +163,12 @@ struct StatsPage<Background: View>: View {
                 }
                 ForEach(period.sessions.prefix(Self.listedSessions)) { session in
                     HStack {
-                        Text(kind == .day ? session.startDate.formatted(date: .omitted, time: .shortened)
-                             : session.startDate.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute()))
+                        Text(kind == .day ? session.start.formatted(date: .omitted, time: .shortened)
+                             : session.start.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute()))
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                         Spacer()
-                        Text(formatFocusTime(minutes: session.durationMinutes))
+                        Text(formatFocusTime(minutes: session.minutes))
                             .font(.system(.body, design: .rounded))
                             .fontWeight(.medium)
                             .foregroundStyle(ink)
@@ -179,7 +179,7 @@ struct StatsPage<Background: View>: View {
                         .padding(.leading, 16)
                 }
                 NavigationLink {
-                    HistoryList(tint: tint)
+                    HistoryCards(tint: tint)
                         .navigationTitle("History")
                         .navigationBarTitleDisplayMode(.inline)
                         .background {
@@ -307,8 +307,8 @@ struct FocusPeriod {
     let total: Int
     /// Minutes a day so far (a month, in a year); none for a day.
     let average: Double?
-    /// The sessions that started in it, the latest first.
-    let sessions: [FocusSession]
+    /// The sessions focused in it, as far as they fall in it, the latest first.
+    let sessions: [SessionPart]
 
     init(_ kind: StatsPeriod, offset: Int, sessions all: [FocusSession], calendar: Calendar = .current) {
         let now = Date()
@@ -343,7 +343,7 @@ struct FocusPeriod {
         }
         total = Int(seconds(current.start, current.end)) / 60
         average = kind == .day ? nil : Double(total) / Double(begun(current))
-        sessions = Array(all.filter { current.start <= $0.startDate && $0.startDate < current.end }.reversed())
+        sessions = all.filter { current.start <= $0.startDate && $0.startDate < current.end }.parts.reversed()
     }
 
     /// Which period it is, in words.
