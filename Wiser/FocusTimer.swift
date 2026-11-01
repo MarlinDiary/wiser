@@ -31,6 +31,11 @@ final class FocusTimer {
         Int(elapsedSeconds) / 60
     }
 
+    /// How long the session has run, not counting pauses, to this very moment.
+    var elapsedNow: TimeInterval {
+        accumulatedBeforePause + (startDate.map { Date().timeIntervalSince($0) } ?? 0)
+    }
+
     var displaySeconds: Int {
         Int(elapsedSeconds) % 60
     }
@@ -75,6 +80,8 @@ final class FocusTimer {
             accumulatedBeforePause += Date().timeIntervalSince(startDate)
         }
         startDate = nil
+        // Hold at the moment of pausing, not at the last tick before it.
+        elapsedSeconds = accumulatedBeforePause
         save()
     }
 

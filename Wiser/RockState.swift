@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum RockState {
+nonisolated enum RockState {
     case checked
     case idle
     case paused

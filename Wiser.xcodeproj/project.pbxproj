@@ -6,8 +6,37 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		565204F08ACFDF2F8161D557 /* WiserLiveActivity.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 72EAD4DA2DDED63D7E05924C /* WiserLiveActivity.appex */; platformFilters = (ios, ); settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		CCCACAE83854E7385E8BFE22 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 57BFCC1B2F747FE400E3CE0F /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A5A6DCCFF180D8E967DCF070;
+			remoteInfo = WiserLiveActivity;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		920AF829735E27F35B0A60A2 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				565204F08ACFDF2F8161D557 /* WiserLiveActivity.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		57BFCC232F747FE400E3CE0F /* Wiser.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Wiser.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		72EAD4DA2DDED63D7E05924C /* WiserLiveActivity.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = WiserLiveActivity.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -17,6 +46,13 @@
 				Info.plist,
 			);
 			target = 57BFCC222F747FE400E3CE0F /* Wiser */;
+		};
+		C0414F646E83CBCAB5E7ABE4 /* Exceptions for "WiserLiveActivity" folder in "WiserLiveActivity" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = A5A6DCCFF180D8E967DCF070 /* WiserLiveActivity */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -29,9 +65,29 @@
 			path = Wiser;
 			sourceTree = "<group>";
 		};
+		0E390C6D1A238750A37E43E2 /* WiserLiveActivity */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				C0414F646E83CBCAB5E7ABE4 /* Exceptions for "WiserLiveActivity" folder in "WiserLiveActivity" target */,
+			);
+			path = WiserLiveActivity;
+			sourceTree = "<group>";
+		};
+		186BFBB86D8F19D5A61374A0 /* Shared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Shared;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		5EDE9D839F6018B26078A44E /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		57BFCC202F747FE400E3CE0F /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -46,6 +102,8 @@
 			isa = PBXGroup;
 			children = (
 				57BFCC252F747FE400E3CE0F /* Wiser */,
+				186BFBB86D8F19D5A61374A0 /* Shared */,
+				0E390C6D1A238750A37E43E2 /* WiserLiveActivity */,
 				57BFCC242F747FE400E3CE0F /* Products */,
 			);
 			sourceTree = "<group>";
@@ -54,6 +112,7 @@
 			isa = PBXGroup;
 			children = (
 				57BFCC232F747FE400E3CE0F /* Wiser.app */,
+				72EAD4DA2DDED63D7E05924C /* WiserLiveActivity.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -68,13 +127,16 @@
 				57BFCC1F2F747FE400E3CE0F /* Sources */,
 				57BFCC202F747FE400E3CE0F /* Frameworks */,
 				57BFCC212F747FE400E3CE0F /* Resources */,
+				920AF829735E27F35B0A60A2 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				E788F41281DA90E3210F4686 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				57BFCC252F747FE400E3CE0F /* Wiser */,
+				186BFBB86D8F19D5A61374A0 /* Shared */,
 			);
 			name = Wiser;
 			packageProductDependencies = (
@@ -82,6 +144,29 @@
 			productName = Wiser;
 			productReference = 57BFCC232F747FE400E3CE0F /* Wiser.app */;
 			productType = "com.apple.product-type.application";
+		};
+		A5A6DCCFF180D8E967DCF070 /* WiserLiveActivity */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B7FF838EA950447A05A6BBC4 /* Build configuration list for PBXNativeTarget "WiserLiveActivity" */;
+			buildPhases = (
+				958931711CE61D991A974983 /* Sources */,
+				5EDE9D839F6018B26078A44E /* Frameworks */,
+				0879E839A84634EFE84530B7 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				0E390C6D1A238750A37E43E2 /* WiserLiveActivity */,
+				186BFBB86D8F19D5A61374A0 /* Shared */,
+			);
+			name = WiserLiveActivity;
+			packageProductDependencies = (
+			);
+			productName = WiserLiveActivity;
+			productReference = 72EAD4DA2DDED63D7E05924C /* WiserLiveActivity.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -94,6 +179,9 @@
 				LastUpgradeCheck = 2630;
 				TargetAttributes = {
 					57BFCC222F747FE400E3CE0F = {
+						CreatedOnToolsVersion = 26.3;
+					};
+					A5A6DCCFF180D8E967DCF070 = {
 						CreatedOnToolsVersion = 26.3;
 					};
 				};
@@ -113,11 +201,19 @@
 			projectRoot = "";
 			targets = (
 				57BFCC222F747FE400E3CE0F /* Wiser */,
+				A5A6DCCFF180D8E967DCF070 /* WiserLiveActivity */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		0879E839A84634EFE84530B7 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		57BFCC212F747FE400E3CE0F /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -128,6 +224,13 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		958931711CE61D991A974983 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		57BFCC1F2F747FE400E3CE0F /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -137,7 +240,83 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		E788F41281DA90E3210F4686 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			platformFilters = (ios, );
+			target = A5A6DCCFF180D8E967DCF070 /* WiserLiveActivity */;
+			targetProxy = CCCACAE83854E7385E8BFE22 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		F97D2E7A50F05EB029EB932B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 33G9D6C5H4;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = WiserLiveActivity/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Wiser;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.chenyeni.wiser.LiveActivity;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		8524979FC378FEE6818D347A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 33G9D6C5H4;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = WiserLiveActivity/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Wiser;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.chenyeni.wiser.LiveActivity;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
 		57BFCC322F747FE500E3CE0F /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -306,6 +485,7 @@
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
+				"MTL_PREPROCESSOR_DEFINITIONS[sdk=iphonesimulator*]" = "SOFTWARE_RAYS=1";
 				ONLY_ACTIVE_ARCH = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
@@ -362,6 +542,7 @@
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
+				"MTL_PREPROCESSOR_DEFINITIONS[sdk=iphonesimulator*]" = "SOFTWARE_RAYS=1";
 				SWIFT_COMPILATION_MODE = wholemodule;
 			};
 			name = Release;
@@ -383,6 +564,15 @@
 			buildConfigurations = (
 				57BFCC322F747FE500E3CE0F /* Debug */,
 				57BFCC332F747FE500E3CE0F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B7FF838EA950447A05A6BBC4 /* Build configuration list for PBXNativeTarget "WiserLiveActivity" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F97D2E7A50F05EB029EB932B /* Debug */,
+				8524979FC378FEE6818D347A /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

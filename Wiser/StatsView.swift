@@ -321,7 +321,7 @@ struct StatsView: View {
     }
 }
 
-private struct StatTile: View {
+struct StatTile: View {
     let title: String
     let value: String
 

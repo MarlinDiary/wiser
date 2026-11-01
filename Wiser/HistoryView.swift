@@ -8,7 +8,27 @@
 import SwiftUI
 import SwiftData
 
+/// Every session, as a sheet on iPhone.
 struct HistoryView: View {
+    var tint: Color
+
+    var body: some View {
+        NavigationStack {
+            HistoryList(tint: tint)
+                .navigationTitle("History")
+                .navigationBarTitleDisplayMode(.inline)
+                .containerBackground(.clear, for: .navigation)
+        }
+        .presentationDetents([.fraction(0.95)])
+        .presentationDragIndicator(.visible)
+        .presentationBackground {
+            AmbientBackground(tint: tint)
+        }
+    }
+}
+
+/// Every session, a day at a time, the latest first; swipe one away to delete it.
+struct HistoryList: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.colorScheme) private var colorScheme
     @Query(sort: \FocusSession.startDate, order: .reverse) private var sessions: [FocusSession]
@@ -34,55 +54,45 @@ struct HistoryView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            List {
-                ForEach(groupedSessions, id: \.date) { group in
-                    Section {
-                        ForEach(group.sessions) { session in
-                            HStack {
-                                Text(session.startDate, style: .time)
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                                Spacer()
-                                Text(formatFocusTime(minutes: session.durationMinutes))
-                                    .font(.system(.body, design: .rounded))
-                                    .fontWeight(.medium)
-                                    .foregroundStyle(tint.ink(for: colorScheme))
-                            }
-                            .listRowBackground(Rectangle().fill(.background.opacity(0.5)))
-                        }
-                        .onDelete { offsets in
-                            for index in offsets {
-                                modelContext.delete(group.sessions[index])
-                            }
-                        }
-                    } header: {
+        List {
+            ForEach(groupedSessions, id: \.date) { group in
+                Section {
+                    ForEach(group.sessions) { session in
                         HStack {
-                            Text(group.date)
+                            Text(session.startDate, style: .time)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
                             Spacer()
-                            Text(formatFocusTime(minutes: group.sessions.reduce(0) { $0 + $1.durationMinutes }))
+                            Text(formatFocusTime(minutes: session.durationMinutes))
+                                .font(.system(.body, design: .rounded))
+                                .fontWeight(.medium)
+                                .foregroundStyle(tint.ink(for: colorScheme))
                         }
+                        .listRowBackground(Rectangle().fill(.background.opacity(0.5)))
+                    }
+                    .onDelete { offsets in
+                        for index in offsets {
+                            modelContext.delete(group.sessions[index])
+                        }
+                    }
+                } header: {
+                    HStack {
+                        Text(group.date)
+                        Spacer()
+                        Text(formatFocusTime(minutes: group.sessions.reduce(0) { $0 + $1.durationMinutes }))
                     }
                 }
             }
-            .listStyle(.insetGrouped)
-            .scrollContentBackground(.hidden)
-            .scrollIndicators(.hidden)
-            .overlay {
-                if sessions.isEmpty {
-                    ContentUnavailableView("No Sessions Yet",
-                                           systemImage: "leaf",
-                                           description: Text("Focus for at least 5 minutes and it will show up here."))
-                }
-            }
-            .navigationTitle("History")
-            .navigationBarTitleDisplayMode(.inline)
-            .containerBackground(.clear, for: .navigation)
         }
-        .presentationDetents([.fraction(0.95)])
-        .presentationDragIndicator(.visible)
-        .presentationBackground {
-            AmbientBackground(tint: tint)
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+        .scrollIndicators(.hidden)
+        .overlay {
+            if sessions.isEmpty {
+                ContentUnavailableView("No Sessions Yet",
+                                       systemImage: "leaf",
+                                       description: Text("Focus for at least 5 minutes and it will show up here."))
+            }
         }
     }
 }
