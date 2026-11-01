@@ -189,6 +189,8 @@ final class OpenSceneRenderer: UIView {
         guard window != nil, displayLink == nil else { return }
         previousTimestamp = nil
         let link = CADisplayLink(target: self, selector: #selector(tick))
+        // Its colors change slowly; sixty a second is as smooth as they get.
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
         link.add(to: .main, forMode: .common)
         displayLink = link
     }
@@ -232,7 +234,7 @@ final class OpenSceneRenderer: UIView {
 
 /// Draws the home screen's scene as light travels through it (see PathTracer.swift), only when
 /// something in it changes.
-final class SceneRenderer: UIView {
+final class SceneRenderer: UIView, CAMetalDisplayLinkDelegate {
     override class var layerClass: AnyClass { CAMetalLayer.self }
 
     private let scene: Rock3DScene
@@ -241,14 +243,16 @@ final class SceneRenderer: UIView {
     private let copy: MTLRenderPipelineState
     private let tracer: PathTracer
     private var isLoadingShapes = false
-    /// The picture as last drawn.
+    /// The picture as last drawn, unless that went straight to the screen.
     private var background: MTLTexture?
+    private var backgroundIsStale = false
     private let blank: MTLTexture
     private let grain: MTLTexture?
     /// Counts frames as they finish being drawn.
     private let drawn: MTLSharedEvent
     private var frameNumber: UInt64 = 0
-    private var displayLink: CADisplayLink?
+    /// Hands over each frame's drawable as the screen is ready for it, with when it will show.
+    private var displayLink: CAMetalDisplayLink?
     private var previousTimestamp: CFTimeInterval?
     /// The scene's colors now, and as drawn, which follow them over a second or two, so the sky changes
     /// gently.
@@ -364,30 +368,42 @@ final class SceneRenderer: UIView {
         return Float(total / Double(max(count, 1)))
     }()
 
-    /// Draws frames for as long as something moves or the picture is still settling, sixty a second.
+    /// Draws frames for as long as something moves or the picture is still settling: as many a second as
+    /// the screen shows, up to a hundred and twenty, while anything moves; sixty while only the sky eases.
     private func run() {
         redraw = true
         guard window != nil else { return }
         if displayLink == nil {
             previousTimestamp = nil
-            let link = CADisplayLink(target: self, selector: #selector(tick))
+            let link = CAMetalDisplayLink(metalLayer: metalLayer)
+            link.delegate = self
+            // A frame being drawn while the last one shows: room for the GPU, still close behind a finger.
+            link.preferredFrameLatency = 2
+            link.preferredFrameRateRange = Self.moving
             link.add(to: .main, forMode: .common)
             displayLink = link
         }
     }
 
-    @objc private func tick(_ link: CADisplayLink) {
-        let elapsed = previousTimestamp.map { link.timestamp - $0 } ?? 0
-        previousTimestamp = link.timestamp
+    /// As smooth as the screen goes, while anything moves; and enough for the sky's slow changes.
+    private static let moving = CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
+    private static let easing = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
+
+    /// Each frame, as the screen has a drawable ready for it: the scene moved on to when it will show, and
+    /// drawn into it.
+    func metalDisplayLink(_ link: CAMetalDisplayLink, needsUpdate update: CAMetalDisplayLink.Update) {
+        // On to when this frame will be on screen, so the stones keep time however often frames come.
+        let elapsed = previousTimestamp.map { update.targetPresentationTimestamp - $0 } ?? 0
+        previousTimestamp = update.targetPresentationTimestamp
         moving = scene.step(elapsed)
         easeLook(elapsed)
         loadShapes()
-        // Never wait for the screen: while two frames are still being drawn, let this one go.
-        if frameNumber - drawn.signaledValue < 2 {
-            draw()
+        // If the GPU has fallen behind, this frame goes, rather than piling more on.
+        if frameNumber - drawn.signaledValue < 3 {
+            draw(into: update.drawable)
         }
         if moving || tracer.isSettling || isLoadingShapes || redraw || isEasing {
-            link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
+            link.preferredFrameRateRange = moving ? Self.moving : Self.easing
         } else {
             link.invalidate()
             displayLink = nil
@@ -397,15 +413,15 @@ final class SceneRenderer: UIView {
     /// Lays the stones' shapes out for tracing, off the main thread, once they're built.
     private func loadShapes() {
         guard !tracer.isLoaded, !isLoadingShapes, scene.isReady else { return }
-        let pebbles = scene.pebbles, scale = Rock3DScene.metersPerPoint
+        let pebbles = scene.pebbles, lifted = scene.liftedPebbles, scale = Rock3DScene.metersPerPoint
         guard !pebbles.isEmpty else { return }
         isLoadingShapes = true
         Task { [weak self] in
-            let shapes = await Task.detached(priority: .userInitiated) {
-                TraceGeometry(pebbles: pebbles, metersPerPoint: scale)
-            }.value
+            async let resting = Task.detached(priority: .userInitiated) { TraceGeometry(pebbles: pebbles, metersPerPoint: scale) }.value
+            async let rising = Task.detached(priority: .userInitiated) { TraceGeometry(pebbles: lifted, metersPerPoint: scale) }.value
+            let (shapes, liftedShapes) = await (resting, rising)
             guard let self else { return }
-            tracer.load(shapes)
+            tracer.load(shapes, lifted: liftedShapes)
             isLoadingShapes = false
             run()
             // The light carried over, worked out once for the stones as they rest in each state.
@@ -433,16 +449,18 @@ final class SceneRenderer: UIView {
         return device.makeTexture(descriptor: descriptor)
     }
 
-    private func draw() {
-        guard let look = shownLook, metalLayer.drawableSize.width > 0, band.height > 0, let drawable = metalLayer.nextDrawable(),
+    private func draw(into drawable: CAMetalDrawable) {
+        guard let look = shownLook, metalLayer.drawableSize.width > 0, band.height > 0,
               let commands = queue.makeCommandBuffer() else { return }
         let screen = drawable.texture
         guard let background = canvas(background, width: screen.width, height: screen.height, format: .bgra8Unorm) else { return }
         self.background = background
         frameNumber += 1
 
-        // The picture, drawn again whenever anything in it may have changed.
-        if tracer.isSettling || moving || startOver || redraw || isEasing || tracer.isLoaded == false {
+        // The picture, drawn again whenever anything in it may have changed, or when the last one went
+        // straight to the screen and so isn't kept.
+        var onScreen = false
+        if tracer.isSettling || moving || startOver || redraw || isEasing || tracer.isLoaded == false || backgroundIsStale {
             let changed: UInt32 = startOver ? 0 : moving ? 8 : 20
             startOver = false
             redraw = false
@@ -455,22 +473,24 @@ final class SceneRenderer: UIView {
             let region = (x: columns, y: rows)
             let transforms = scene.stoneTransforms()
             tracer.turn = scene.turn
+            tracer.shapeBlend = scene.shapeBlends()
             let shade = scene.groundShade()
             tracer.poseBlend = (Self.poseOrder.firstIndex(of: shade.from) ?? 0, Self.poseOrder.firstIndex(of: shade.to) ?? 0, shade.progress)
             tracer.stoneBounce = look.isDark ? Self.darkStone : 1
             let uniforms = Self.traceUniforms(look: look, lighting: scene.lighting, camera: scene.camera, band: band,
                                               pixelsPerPoint: metalLayer.contentsScale, screen: screen)
-            tracer.encode(uniforms, stones: tracer.stones(transforms),
-                          changed: changed, region: region, samples: moving ? 2 : 1, bounces: moving ? 3 : 6, commands: commands,
-                          background: background, grain: grain, blank: blank)
+            onScreen = tracer.encode(uniforms, stones: tracer.stones(transforms),
+                                     changed: changed, region: region, samples: moving ? 2 : 1, bounces: moving ? 3 : 6, commands: commands,
+                                     background: background, screen: screen, grain: grain, blank: blank)
+            backgroundIsStale = onScreen
         }
 
-        // The screen: the picture.
+        // The screen: the picture, unless it was drawn there already.
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = screen
         pass.colorAttachments[0].loadAction = .dontCare
         pass.colorAttachments[0].storeAction = .store
-        if let encoder = commands.makeRenderCommandEncoder(descriptor: pass) {
+        if !onScreen, let encoder = commands.makeRenderCommandEncoder(descriptor: pass) {
             encoder.setRenderPipelineState(copy)
             encoder.setFragmentTexture(background, index: 0)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)

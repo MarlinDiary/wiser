@@ -321,7 +321,31 @@ static inline bool blocked(float3 origin, float3 direction, thread const Geometr
     if (direction.y <= 0) {
         return true;
     }
+#if SOFTWARE_RAYS
     return trace(origin, direction, INFINITY, g, true).what >= 0;
+#else
+    // Only whether, not where: the hardware needn't work out which triangle or where on it.
+    ray r(origin, direction, 1e-6, INFINITY);
+    intersector<instancing> stones;
+    stones.assume_geometry_type(geometry_type::triangle);
+    stones.force_opacity(forced_opacity::opaque);
+    stones.accept_any_intersection(true);
+    return stones.intersect(r, g.scene, 0xFF).type != intersection_type::none;
+#endif
+}
+
+/// Whether any of the key light's directions from `p` could meet a stone: whether its disc, seen from
+/// `p`, overlaps the sphere around any stone. Where none can, its straight light needs no rays traced.
+static bool keyMightMeet(float3 p, constant TraceUniforms &u, constant TraceStone *stones) {
+    float spread = acos(clamp(u.key.w, -1.0, 1.0)) + 0.01;
+    for (int k = 0; k < 3; k++) {
+        float3 to = stones[k].bounds.xyz - p;
+        float distance = length(to), radius = stones[k].bounds.w;
+        if (distance <= radius || acos(clamp(dot(to / distance, u.key.xyz), -1.0, 1.0)) <= spread + asin(radius / distance)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // MARK: Light
@@ -865,6 +889,21 @@ kernel void mistKernel(uint2 pixel [[thread_position_in_grid]],
 }
 
 /// The scene away from the stones: the sky, and the ground lit as its map says, seen through the mist.
+/// The scene away from the stones at `pixel`: the sky, or the ground lit as `map` says, each through the
+/// mist as `mist` holds it.
+static float3 backdropAt(uint2 pixel, constant TraceUniforms &u, texture2d<float> map, texture2d<float> mist) {
+    float4 seen = mist.read(pixel);
+    if (seen.a < 0) {
+        return seen.rgb;
+    }
+    float2 p = (float2(pixel) + 0.5) / u.pixelsPerPoint;
+    float3 direction = normalize(u.forward.xyz + (p.x - u.center.x) / u.focal * u.right.xyz
+                                 + (u.center.y - p.y) / u.focal * u.up.xyz);
+    float t = -u.eye.y / min(direction.y, -1e-7);
+    Surface ground = groundSurface(u.eye.xyz + direction * t, u);
+    return groundShade(ground, u, map) * seen.a + seen.rgb;
+}
+
 kernel void backdropKernel(uint2 pixel [[thread_position_in_grid]],
                            constant TraceUniforms &u [[buffer(0)]],
                            texture2d<float, access::write> backdrop [[texture(0)]],
@@ -873,18 +912,7 @@ kernel void backdropKernel(uint2 pixel [[thread_position_in_grid]],
     if (pixel.x >= uint(u.viewSize.x) || pixel.y >= uint(u.viewSize.y)) {
         return;
     }
-    float4 seen = mist.read(pixel);
-    if (seen.a < 0) {
-        backdrop.write(float4(seen.rgb, 1), pixel);
-        return;
-    }
-    float2 p = (float2(pixel) + 0.5) / u.pixelsPerPoint;
-    float3 direction = normalize(u.forward.xyz + (p.x - u.center.x) / u.focal * u.right.xyz
-                                 + (u.center.y - p.y) / u.focal * u.up.xyz);
-    float t = -u.eye.y / min(direction.y, -1e-7);
-    Surface ground = groundSurface(u.eye.xyz + direction * t, u);
-    float3 light = groundShade(ground, u, map) * seen.a + seen.rgb;
-    backdrop.write(float4(light, 1), pixel);
+    backdrop.write(float4(backdropAt(pixel, u, map, mist), 1), pixel);
 }
 
 /// How much of the light around a glossy surface it reflects, all told, seen from `nv` with `roughness`,
@@ -1571,7 +1599,10 @@ kernel void stoneLightKernel(uint v [[thread_position_in_grid]],
                              constant uint4 &bases [[buffer(19)]],
                              device float4 *lit [[buffer(20)]],
                              device const half *towards [[buffer(21)]],
-                             constant float &blend [[buffer(22)]]) {
+                             constant float &blend [[buffer(22)]],
+                             device const float4 *liftedPositions [[buffer(23)]],
+                             device const float4 *liftedNormals [[buffer(24)]],
+                             constant float *lifted [[buffer(25)]]) {
     if (v >= bases.w) {
         return;
     }
@@ -1589,8 +1620,10 @@ kernel void stoneLightKernel(uint v [[thread_position_in_grid]],
     int k = v < bases.y ? 0 : v < bases.z ? 1 : 2;
     constant TraceStone &stone = stones[k];
     float3x3 rotation = float3x3(stone.toWorld[0].xyz, stone.toWorld[1].xyz, stone.toWorld[2].xyz);
-    float3 p = (stone.toWorld * float4(positions[v].xyz, 1)).xyz;
-    float3 n = normalize(rotation * normals[v].xyz);
+    // Where the point is as far as the stone has taken its lifted shape; its shadows are still found
+    // against the stones resting, which differ only underneath, where the key light doesn't reach.
+    float3 p = (stone.toWorld * float4(mix(positions[v].xyz, liftedPositions[v].xyz, lifted[k]), 1)).xyz;
+    float3 n = normalize(rotation * normalize(mix(normals[v].xyz, liftedNormals[v].xyz, lifted[k])));
     float3 start = p + n * 3e-5;
     float seen = 0, facing = 0, falling = 0;
     float turn = float(hashed(v * 7919u + 13u)) / 4294967296.0;
@@ -1669,9 +1702,10 @@ kernel void groundKeyKernel(uint2 texel [[thread_position_in_grid]],
     }
     float turn = float(hashed(texel.y * 104729u + texel.x * 7919u + 31u)) / 4294967296.0;
     float falling = 0;
+    bool open = !keyMightMeet(start, u, g.stones);
     for (uint s = 0; s < keySamples; s++) {
         float3 d = acrossKey(u, s, keySamples, turn);
-        if (d.y > 0 && !blocked(start, d, g)) {
+        if (d.y > 0 && (open || !blocked(start, d, g))) {
             falling += d.y;
         }
     }
@@ -1737,9 +1771,24 @@ struct StoneFragmentIn {
     float sky;
 };
 
+/// The same, as the corners give it, with how far above the ground each is: what's sunk into the ground
+/// is cut off there before it's drawn, its edge as smooth as the stones' others (hiding it point by point
+/// left it jagged), and so the GPU can still leave unshaded whatever is out of sight behind.
+struct StoneVertexOut {
+    float4 position [[position]];
+    float aboveGround [[clip_distance]] [1];
+    float3 world;
+    float3 normal;
+    float3 across;
+    float3 along;
+    float2 uv;
+    float4 light;
+    float sky;
+};
+
 /// A stone's corner, where `toWorld` puts it, seen with the stones' camera in the rectangle of the view
 /// the stones take; with the light falling on it.
-vertex StoneFragmentIn stoneVertex(uint v [[vertex_id]],
+vertex StoneVertexOut stoneVertex(uint v [[vertex_id]],
                                    constant TraceUniforms &u [[buffer(0)]],
                                    constant float4x4 &toWorld [[buffer(1)]],
                                    device const float4 *positions [[buffer(2)]],
@@ -1747,11 +1796,18 @@ vertex StoneFragmentIn stoneVertex(uint v [[vertex_id]],
                                    device const float4 *tangents [[buffer(4)]],
                                    device const float4 *bitangents [[buffer(5)]],
                                    device const float2 *coordinates [[buffer(6)]],
-                                   device const float4 *lit [[buffer(7)]]) {
-    StoneFragmentIn out;
+                                   device const float4 *lit [[buffer(7)]],
+                                   device const float4 *liftedPositions [[buffer(8)]],
+                                   device const float4 *liftedNormals [[buffer(9)]],
+                                   constant float &lifted [[buffer(10)]]) {
+    StoneVertexOut out;
     float3x3 rotation = float3x3(toWorld[0].xyz, toWorld[1].xyz, toWorld[2].xyz);
-    out.world = (toWorld * float4(positions[v].xyz, 1)).xyz;
-    out.normal = rotation * normals[v].xyz;
+    // Between the stone's shape resting and its shape lifted off its seat, as far as it has risen.
+    float3 position = mix(positions[v].xyz, liftedPositions[v].xyz, lifted);
+    float3 normal = normalize(mix(normals[v].xyz, liftedNormals[v].xyz, lifted));
+    out.world = (toWorld * float4(position, 1)).xyz;
+    out.aboveGround[0] = out.world.y;
+    out.normal = rotation * normal;
     out.across = rotation * tangents[v].xyz;
     out.along = rotation * bitangents[v].xyz;
     out.uv = coordinates[v];
@@ -1791,10 +1847,6 @@ fragment half4 stoneFragment(StoneFragmentIn in [[stage_in]],
                                 constant float *scale [[buffer(2)]],
                                 texture2d<float> color [[texture(0)]],
                                 texture2d<float> relief [[texture(1)]]) {
-    // The ground hides what's sunk into it.
-    if (in.world.y < 0) {
-        discard_fragment();
-    }
     constexpr sampler tiled(coord::normalized, address::repeat, filter::linear, mip_filter::linear);
     float3 n = normalize(in.normal);
     float3 toEye = normalize(u.eye.xyz - in.world);
@@ -1852,13 +1904,10 @@ fragment half4 stoneFragment(StoneFragmentIn in [[stage_in]],
 
 /// The scene as the screen shows it, with the stones drawn rather than traced: the backdrop, the stones
 /// over it where they are; exposed, with highlights rolling off softly, encoded, with the paper's grain.
-fragment half4 bakedDisplayFragment(DisplayVertex in [[stage_in]], constant TraceUniforms &u [[buffer(0)]],
-                                    texture2d<float> backdrop [[texture(0)]],
-                                    texture2d<float> stones [[texture(1)]],
-                                    texture2d<float> grain [[texture(2)]]) {
+/// What the screen shows at `pixel`, with `light` behind the stones: the stones drawn over it, all of it
+/// exposed, its brightest eased off, encoded, with the grain over it.
+static half4 shown(uint2 pixel, float3 light, constant TraceUniforms &u, texture2d<float> stones, texture2d<float> grain) {
     constexpr sampler tiled(filter::linear, address::repeat);
-    uint2 pixel = uint2(in.position.xy);
-    float3 light = backdrop.read(pixel).rgb;
     int2 inside = int2(pixel) - int2(int(u.regionLeft), int(u.regionTop));
     if (inside.x >= 0 && inside.y >= 0 && inside.x < int(u.regionWidth) && inside.y < int(u.regionHeight)) {
         float4 stone = stones.read(uint2(inside));
@@ -1868,10 +1917,29 @@ fragment half4 bakedDisplayFragment(DisplayVertex in [[stage_in]], constant Trac
     float3 over = max(light - 0.8, 0.0);
     light = min(light, 0.8) + 0.2 * (1 - exp(-over / 0.2));
     float3 base = encoded(saturate(light));
-    float g = grain.sample(tiled, in.position.xy / u.pixelsPerPoint / 100).r;
+    float g = grain.sample(tiled, (float2(pixel) + 0.5) / u.pixelsPerPoint / 100).r;
     float3 lit = g <= 0.5 ? base - (1 - 2 * g) * base * (1 - base)
         : base + (2 * g - 1) * (select(sqrt(base), ((16 * base - 12) * base + 4) * base, base <= 0.25) - base);
     return half4(half3(mix(base, lit, u.grainOpacity)), 1);
+}
+
+fragment half4 bakedDisplayFragment(DisplayVertex in [[stage_in]], constant TraceUniforms &u [[buffer(0)]],
+                                    texture2d<float> backdrop [[texture(0)]],
+                                    texture2d<float> stones [[texture(1)]],
+                                    texture2d<float> grain [[texture(2)]]) {
+    uint2 pixel = uint2(in.position.xy);
+    return shown(pixel, backdrop.read(pixel).rgb, u, stones, grain);
+}
+
+/// The same, with the scene away from the stones worked out here rather than read from a backdrop drawn
+/// beforehand: one pass over the screen instead of two, and nothing in between to write and read back.
+fragment half4 bakedSceneFragment(DisplayVertex in [[stage_in]], constant TraceUniforms &u [[buffer(0)]],
+                                  texture2d<float> mist [[texture(0)]],
+                                  texture2d<float> map [[texture(1)]],
+                                  texture2d<float> stones [[texture(2)]],
+                                  texture2d<float> grain [[texture(3)]]) {
+    uint2 pixel = uint2(in.position.xy);
+    return shown(pixel, backdropAt(pixel, u, map, mist), u, stones, grain);
 }
 
 /// The scene with no stones in it, as the screen shows it: the sky, and the ground as open to it as it is

@@ -31,6 +31,8 @@ struct AIChatView<Background: View>: View {
         }
         .navigationTitle("Ask AI")
         .navigationBarTitleDisplayMode(.inline)
+        // The tab says which page this is; the title stays for VoiceOver.
+        .toolbar(removing: .title)
     }
 }
 

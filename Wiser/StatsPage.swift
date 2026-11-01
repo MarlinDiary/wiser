@@ -28,6 +28,10 @@ struct StatsPage<Background: View>: View {
     private var ink: Color {
         tint.ink(for: colorScheme)
     }
+    /// The page's own color behind the chart: the sky at the horizon, as the scene it stands on shows it.
+    private var paper: Color {
+        Color(uiColor: SceneLook(tint: tint, isDark: colorScheme == .dark).horizonColor)
+    }
 
     /// How many periods there are to swipe through: back to the one the first session was in.
     private var periodCount: Int {
@@ -74,6 +78,8 @@ struct StatsPage<Background: View>: View {
         }
         .navigationTitle("Stats")
         .navigationBarTitleDisplayMode(.inline)
+        // The tab says which page this is; the title stays for VoiceOver and the way back from History.
+        .toolbar(removing: .title)
         .onChange(of: kind) {
             shown = 0
             picked = nil
@@ -106,7 +112,7 @@ struct StatsPage<Background: View>: View {
         ScrollView(.horizontal) {
             LazyHStack(spacing: 0) {
                 ForEach((1 - periodCount)...0, id: \.self) { offset in
-                    PeriodChart(period: FocusPeriod(kind, offset: offset, sessions: sessions), ink: ink,
+                    PeriodChart(period: FocusPeriod(kind, offset: offset, sessions: sessions), ink: ink, paper: paper,
                                 picked: offset == (shown ?? 0) ? $picked : .constant(nil))
                         // Room for the labels above the top line and below the bars.
                         .padding(.vertical, 12)
@@ -208,10 +214,12 @@ struct StatsPage<Background: View>: View {
 private struct PeriodChart: View {
     var period: FocusPeriod
     var ink: Color
+    /// What the chart stands on, for the bars that aren't picked out.
+    var paper: Color
     @Binding var picked: Int?
 
     var body: some View {
-        let top = Self.axisMax(for: period.buckets.map(\.minutes).max() ?? 0)
+        let tallest = period.buckets.map(\.minutes).max() ?? 0
         let highlighted = picked ?? period.buckets.first(where: \.isCurrent)?.id
         Chart {
             ForEach(period.buckets) { entry in
@@ -219,33 +227,29 @@ private struct PeriodChart: View {
                     BarMark(x: .value("Time", entry.id),
                             y: .value("Minutes", entry.minutes),
                             width: .fixed(period.kind.barWidth))
-                        .cornerRadius(period.kind.barWidth / 2)
-                        .foregroundStyle(entry.id == highlighted ? ink : ink.opacity(0.5))
+                        .clipShape(Capsule())
+                        // Solid, so the lines behind don't show through.
+                        .foregroundStyle(entry.id == highlighted ? ink : ink.mix(with: paper, by: 0.5))
                 }
-            }
-            if let average = period.average, average > 0 {
-                RuleMark(y: .value("Average", average))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
-                    .foregroundStyle(ink.opacity(0.5))
             }
         }
         .chartXScale(domain: -0.5...(Double(period.buckets.count) - 0.5))
-        .chartYScale(domain: 0...top)
+        // The tallest bar reaches nearly to the top, whatever it is.
+        .chartYScale(domain: 0...(tallest > 0 ? Double(tallest) * 1.06 : 60))
         .chartXAxis {
-            AxisMarks(values: period.kind.labeledIndices(count: period.buckets.count)) { value in
-                AxisValueLabel {
-                    if let i = value.as(Int.self), period.buckets.indices.contains(i) {
-                        Text(period.kind.axisLabel(for: period.buckets[i]))
-                    }
+            // A mark at the start of each bar's slot, so each label sits centered in the slot, under its bar.
+            AxisMarks(values: (0...period.buckets.count).map { Double($0) - 0.5 }) { value in
+                AxisValueLabel(centered: true) {
+                    Text(label(at: value.as(Double.self)))
                 }
             }
         }
         .chartYAxis {
-            AxisMarks(position: .trailing, values: [0, top / 2, top]) { value in
+            AxisMarks(position: .trailing, values: Self.lines(upTo: tallest)) { value in
                 AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 3]))
                     .foregroundStyle(ink.opacity(0.25))
                 AxisValueLabel {
-                    if let minutes = value.as(Int.self), minutes > 0 {
+                    if let minutes = value.as(Int.self) {
                         Text(Self.axisText(minutes: minutes))
                     }
                 }
@@ -270,11 +274,19 @@ private struct PeriodChart: View {
         .animation(.snappy, value: picked)
     }
 
-    /// The top of the chart: the next whole half hour, hour or more above `minutes`, an hour at least.
-    private static func axisMax(for minutes: Int) -> Int {
-        let step = max(1, Int((Double(max(minutes, 60)) / 2).rounded(.up)))
-        let niceStep = step <= 30 ? 30 : step <= 60 ? 60 : ((step + 59) / 60) * 60
-        return niceStep * 2
+    /// The label under the bar whose slot starts at `start`, if that bar is one that's labeled.
+    private func label(at start: Double?) -> String {
+        guard let start else { return "" }
+        let i = Int((start + 0.5).rounded())
+        return period.buckets.indices.contains(i) && period.kind.labeledIndices(count: period.buckets.count).contains(i)
+            ? period.kind.axisLabel(for: period.buckets[i]) : ""
+    }
+
+    /// Where the lines across the chart go, in minutes: a round length apart, no more than three of them,
+    /// none at the bottom and none above the tallest bar, `minutes` tall.
+    private static func lines(upTo minutes: Int) -> [Int] {
+        let step = [15, 30, 60, 120, 180, 240, 360, 480, 720].first { minutes / $0 <= 3 } ?? 1440
+        return Array(stride(from: step, through: minutes, by: step))
     }
 
     private static func axisText(minutes: Int) -> String {
@@ -282,8 +294,8 @@ private struct PeriodChart: View {
     }
 }
 
-/// How long you focused in one day, week, month or year: in all, bit by bit across it, against the one
-/// before, and the sessions it was made of.
+/// How long you focused in one day, week, month or year: in all, bit by bit across it, and the sessions it
+/// was made of.
 struct FocusPeriod {
     let kind: StatsPeriod
     /// 0 for the current period, -1 for the one before, and so on.
@@ -295,8 +307,6 @@ struct FocusPeriod {
     let total: Int
     /// Minutes a day so far (a month, in a year); none for a day.
     let average: Double?
-    /// How much more or less than in the period before, in percent, if there was any focus then.
-    let change: Int?
     /// The sessions that started in it, the latest first.
     let sessions: [FocusSession]
 
@@ -333,11 +343,6 @@ struct FocusPeriod {
         }
         total = Int(seconds(current.start, current.end)) / 60
         average = kind == .day ? nil : Double(total) / Double(begun(current))
-        let previous = interval(offset - 1)
-        let previousMinutes = Int(seconds(previous.start, previous.end)) / 60
-        let before = average == nil ? Double(previousMinutes) : Double(previousMinutes) / Double(begun(previous))
-        let after = average ?? Double(total)
-        change = before > 0 ? Int(((after - before) / before * 100).rounded()) : nil
         sessions = Array(all.filter { current.start <= $0.startDate && $0.startDate < current.end }.reversed())
     }
 
@@ -362,23 +367,11 @@ struct FocusPeriod {
         }
     }
 
-    /// The average, and how it compares with the period before.
+    /// The average, a day (a month, in a year).
     var summary: String {
-        var parts: [String] = []
-        if let average {
-            parts.append(kind == .year ? String(localized: "Monthly avg \(formatFocusTime(minutes: Int(average)))")
-                         : String(localized: "Daily avg \(formatFocusTime(minutes: Int(average)))"))
-        }
-        if let change {
-            let before: String = switch kind {
-            case .day: offset == 0 ? String(localized: "yesterday") : String(localized: "the day before")
-            case .week: offset == 0 ? String(localized: "last week") : String(localized: "the week before")
-            case .month: offset == 0 ? String(localized: "last month") : String(localized: "the month before")
-            case .year: offset == 0 ? String(localized: "last year") : String(localized: "the year before")
-            }
-            parts.append("\(change >= 0 ? "+" : "−")\(abs(change))% vs \(before)")
-        }
-        return parts.isEmpty ? " " : parts.joined(separator: " · ")
+        guard let average else { return " " }
+        return kind == .year ? String(localized: "Monthly avg \(formatFocusTime(minutes: Int(average)))")
+            : String(localized: "Daily avg \(formatFocusTime(minutes: Int(average)))")
     }
 }
 

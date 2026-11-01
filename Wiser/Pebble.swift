@@ -38,8 +38,10 @@ nonisolated struct Pebble: Sendable {
     /// How the outline is filled out into a stone.
     enum Inflation {
         /// Each ray out from the middle of a face its own quarter ellipse: full right out to the ends, but
-        /// where the outline bulges, a ridge runs out to the bulge.
-        case rays
+        /// where the outline bulges, a ridge runs out to the bulge, and turned round, the stone shows it as an
+        /// edge. Eased `smoothed` of the way toward the membrane's fill, the ridges soften as much, while the
+        /// stone stays nearly as full.
+        case rays(smoothed: Float)
         /// A membrane over the outline, pushed up evenly: smooth all over, whatever the outline.
         case membrane
     }
@@ -77,9 +79,11 @@ nonisolated struct Pebble: Sendable {
     /// The same stone with a seat worn into its underside where, placed at `pose`, it would otherwise
     /// pass into `lower` placed at `lowerPose`, so that it rests on it snugly instead: a shallow dish worn
     /// smooth, as water wears a stone, that leaves `clearance` points between the stones and eases out
-    /// over `blend` points across and up, so the underside stays as rounded as the rest of the stone.
+    /// over `blend` points across and up, so the underside stays as rounded as the rest of the stone; and
+    /// over `behind` points (if it's more) toward the back of the stack, where it can't be seen from in
+    /// front, so it's no sharper there than it has to be.
     func seated(at pose: StoneStack.Pose, on lower: StoneStack.Stone, at lowerPose: StoneStack.Pose,
-                clearance: Float = 0.3, blend: Float) -> Pebble {
+                clearance: Float = 0.3, blend: Float, behind: Float = 0) -> Pebble {
         let points = surface.positions.map(pose.apply)
         let lifts = StoneStack.lift(points, outOf: lower, at: lowerPose, clearance: clearance)
         let seat = lifts.indices.filter { lifts[$0] > 0 }
@@ -87,14 +91,15 @@ nonisolated struct Pebble: Sendable {
 
         // A map of how far up the underside has to go, across the ground under the stone.
         let cell: Float = 2
-        let reach = Int((blend / cell).rounded(.up))
+        let widest = max(blend, behind)
+        let reach = Int((blend / cell).rounded(.up)), backReach = Int((widest / cell).rounded(.up))
         var low = SIMD2<Float>(repeating: .infinity), high = SIMD2<Float>(repeating: -.infinity)
         for i in seat {
             low = simd_min(low, SIMD2(points[i].x, points[i].z))
             high = simd_max(high, SIMD2(points[i].x, points[i].z))
         }
-        low -= blend + 2 * cell
-        high += blend + 2 * cell
+        low -= widest + 2 * cell
+        high += widest + 2 * cell
         let columns = Int(((high.x - low.x) / cell).rounded(.up)) + 1, rows = Int(((high.y - low.y) / cell).rounded(.up)) + 1
         var field = [Float](repeating: 0, count: columns * rows)
         for i in seat {
@@ -102,20 +107,21 @@ nonisolated struct Pebble: Sendable {
             field[r * columns + c] = max(field[r * columns + c], lifts[i])
         }
         // Spread out so each spot takes the most of what's around it, falling off smoothly within
-        // `blend` (a bump that's the same both ways, so this is exact taken one way and then the other);
-        // then softened, so where two spots' bumps meet there's no crease.
-        func pass(_ values: [Float], kernel: [Float], combine: (Float, Float) -> Float, start: Float) -> [Float] {
+        // `blend`, and backward within `behind` (a bump taken across and then front to back, so this is
+        // exact); then softened, so where two spots' bumps meet there's no crease. Each kernel is its
+        // weights by how many cells away they are; rows run toward the front.
+        func pass(_ values: [Float], across: [(Int, Float)], along: [(Int, Float)], combine: (Float, Float) -> Float,
+                  start: Float) -> [Float] {
             var result = values
-            let half = kernel.count / 2
-            for horizontal in [true, false] {
+            for (horizontal, kernel) in [(true, across), (false, along)] {
                 let source = result
                 for r in 0..<rows {
                     for c in 0..<columns {
                         var value = start
-                        for d in -half...half {
+                        for (d, weight) in kernel {
                             let rr = horizontal ? r : r + d, cc = horizontal ? c + d : c
                             guard rr >= 0, rr < rows, cc >= 0, cc < columns else { continue }
-                            value = combine(value, source[rr * columns + cc] * kernel[d + half])
+                            value = combine(value, source[rr * columns + cc] * weight)
                         }
                         result[r * columns + c] = value
                     }
@@ -123,14 +129,20 @@ nonisolated struct Pebble: Sendable {
             }
             return result
         }
-        let bump = (-reach...reach).map { d -> Float in
-            let s = Float(d) / Float(reach)
-            return (1 - s * s) * (1 - s * s)
+        // Falling off to nothing `before` cells one way and `after` the other. A spot in front of another
+        // (d > 0) spreads back to it.
+        func bump(_ before: Int, _ after: Int) -> [(Int, Float)] {
+            (-before...after).map { d in
+                let s = Float(d) / Float(d < 0 ? before : max(after, 1))
+                return (d, (1 - s * s) * (1 - s * s))
+            }
         }
         let soft = reach / 3
-        let gauss = (-soft...soft).map { d -> Float in exp(-Float(d * d) / Float(2 * max(soft * soft / 4, 1))) }
-        let total = gauss.reduce(0, +)
-        field = pass(pass(field, kernel: bump, combine: max, start: 0), kernel: gauss.map { $0 / total }, combine: +, start: 0)
+        let gauss = (-soft...soft).map { d in (d, exp(-Float(d * d) / Float(2 * max(soft * soft / 4, 1)))) }
+        let total = gauss.reduce(0) { $0 + $1.1 }
+        let even = gauss.map { ($0.0, $0.1 / total) }
+        field = pass(pass(field, across: bump(reach, reach), along: bump(reach, backReach), combine: max, start: 0),
+                     across: even, along: even, combine: +, start: 0)
         func spread(at x: Float, _ z: Float) -> Float {
             let p = (SIMD2(x, z) - low) / cell
             let c = Int(p.x.rounded(.down)), r = Int(p.y.rounded(.down))
@@ -144,13 +156,13 @@ nonisolated struct Pebble: Sendable {
         let short = seat.map { lifts[$0] / max(spread(at: points[$0].x, points[$0].z), 1e-4) }.max() ?? 1
         let scale = max(1, short)
 
-        // Only the underside moves: the lift eases out above the seat, over the same distance as across.
+        // Only the underside moves: the lift eases out above the seat, over as far as it reaches across.
         let seatTop = seat.map { points[$0].y }.max()!
         let down = pose.rotation.inverse
         var surface = surface
         var lifted = [Float](repeating: 0, count: points.count)
         for i in points.indices {
-            let above = (points[i].y - seatTop) / blend
+            let above = (points[i].y - seatTop) / widest
             guard above < 1 else { continue }
             let fade = above > 0 ? 1 - above : 1
             lifted[i] = spread(at: points[i].x, points[i].z) * scale * fade * fade * (3 - 2 * fade)
@@ -223,6 +235,33 @@ nonisolated struct Pebble: Sendable {
         var surface = surface
         for i in surface.positions.indices where surface.positions[i].y < floor {
             surface.positions[i].y = floor
+        }
+        surface.normals = Self.weldedNormals(positions: surface.positions, indices: surface.indices)
+        return Pebble(surface: surface)
+    }
+
+    /// The same stone leaning back as seen from `eye`, in the stone's own frame: each point moved away from
+    /// `eye` along its line of sight by `back` times how high it is between the stone's bottom and its top.
+    /// The bottom stays where it is, the top ends up `back` points further back, and from `eye` the stone
+    /// looks just the same.
+    func leaning(back: Float, seenFrom eye: SIMD3<Float>) -> Pebble {
+        let heights = surface.positions.map(\.y)
+        let low = heights.min()!, high = heights.max()!
+        var surface = surface
+        surface.positions = surface.positions.map { p in
+            let away = back * (p.y - low) / (high - low)
+            return eye + (p - eye) * ((eye.z - p.z + away) / (eye.z - p.z))
+        }
+        surface.normals = Self.weldedNormals(positions: surface.positions, indices: surface.indices)
+        return Pebble(surface: surface)
+    }
+
+    /// The same stone with each point moved back toward where it was before its seat was worn in, by its
+    /// share in `shares`: 0 not at all, 1 all the way. `unseated` is this stone before its seat was worn in.
+    func regrown(from unseated: Pebble, shares: [Float]) -> Pebble {
+        var surface = surface
+        for i in surface.positions.indices {
+            surface.positions[i] += (unseated.surface.positions[i] - surface.positions[i]) * shares[i]
         }
         surface.normals = Self.weldedNormals(positions: surface.positions, indices: surface.indices)
         return Pebble(surface: surface)
@@ -319,10 +358,12 @@ nonisolated struct Pebble: Sendable {
         switch shape.inflation {
         case .membrane:
             rise = Self.rise(radii: radii, center: center, rings: rings, profile: shape.profile)
-        case .rays:
+        case .rays(let smoothed):
+            let membrane = smoothed > 0 ? Self.rise(radii: radii, center: center, rings: rings, profile: shape.profile) : []
             rise = (0..<perFace).map { i in
                 let ring = i == 0 ? 0 : (i - 1) / angles + 1
-                return pow(max(0, cos(Float(ring) / Float(rings) * .pi / 2)), 2 / shape.profile)
+                let own = pow(max(0, cos(Float(ring) / Float(rings) * .pi / 2)), 2 / shape.profile)
+                return smoothed > 0 ? own + (membrane[i] - own) * smoothed : own
             }
         }
 

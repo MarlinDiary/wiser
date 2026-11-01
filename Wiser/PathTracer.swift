@@ -181,12 +181,31 @@ final class PathTracer {
     #endif
     private let color: MTLTexture
     private let relief: MTLTexture
-    private var geometry: (nodes: MTLBuffer, triangles: MTLBuffer, indices: MTLBuffer, normals: MTLBuffer,
-                           tangents: MTLBuffer, bitangents: MTLBuffer, coordinates: MTLBuffer, positions: MTLBuffer,
-                           stones: [TraceGeometry.Stone])?
+    private typealias Geometry = (nodes: MTLBuffer, triangles: MTLBuffer, indices: MTLBuffer, normals: MTLBuffer,
+                                  tangents: MTLBuffer, bitangents: MTLBuffer, coordinates: MTLBuffer, positions: MTLBuffer,
+                                  stones: [TraceGeometry.Stone])
+    private var geometry: Geometry?
+    /// The stones once lifted off their seats (see `StoneLayout.lifted`): the light for the poses they're
+    /// lifted in is worked out with these, and the stones drawn take them on as they rise.
+    private var liftedGeometry: Geometry?
+    /// How far each stone drawn has taken its lifted shape, from 0 to 1.
+    var shapeBlend: [Float] = []
     /// The stones as the GPU's own ray tracing sees them: each stone's triangles, once, and the three where
     /// they stand, each frame, from one of a few sets of instances so a frame still being traced keeps its own.
     private var shapes: [MTLAccelerationStructure] = []
+    private var liftedShapes: [MTLAccelerationStructure] = []
+    /// Whether rays meet the stones in their lifted shapes rather than as they rest: once the bottom stone,
+    /// the last of them to take its lifted shape, has mostly taken it.
+    private var tracesLifted: Bool {
+        (shapeBlend.first ?? 0) > 0.5
+    }
+    /// The stones' shapes as rays meet them now, and the same for the ray tracing hardware.
+    private var traced: (geometry: Geometry?, shapes: [MTLAccelerationStructure]) {
+        if tracesLifted {
+            return (liftedGeometry, liftedShapes)
+        }
+        return (geometry, shapes)
+    }
     private var scene: (structure: MTLAccelerationStructure, scratch: MTLBuffer)?
     private var instances: [MTLBuffer] = []
     private var instanceTurn = 0
@@ -228,6 +247,8 @@ final class PathTracer {
     private let fillBuried: MTLComputePipelineState
     private let stoneRaster: MTLRenderPipelineState
     private let bakedDisplay: MTLRenderPipelineState
+    /// The same, working out the scene away from the stones as it goes.
+    private let bakedScene: MTLRenderPipelineState
     private let stoneDepth: MTLDepthStencilState
     private let harmonicScale: MTLBuffer
     /// What each stone vertex, and each point of the ground's map around the stack, keeps: for each of
@@ -307,6 +328,7 @@ final class PathTracer {
         display = show("displayFragment")
         displayFX = show("displayFXFragment")
         bakedDisplay = show("bakedDisplayFragment")
+        bakedScene = show("bakedSceneFragment")
         #if targetEnvironment(simulator)
         usesFX = false
         #else
@@ -327,15 +349,25 @@ final class PathTracer {
         isBaking || (drewBaked ? stillFrames == 0 : (usesFX && !refining) || stillFrames < Self.samplesWhenStill)
     }
 
-    func load(_ shapes: TraceGeometry) {
+    /// Takes the stones as they rest, and as they are once lifted: the same points, some of them moved.
+    func load(_ shapes: TraceGeometry, lifted: TraceGeometry) {
         func buffer<T>(_ values: [T]) -> MTLBuffer {
             values.withUnsafeBytes { device.makeBuffer(bytes: $0.baseAddress!, length: max($0.count, 16))! }
         }
-        let positions = buffer(shapes.positions)
-        geometry = (buffer(shapes.nodes), buffer(shapes.triangles), buffer(shapes.indices), buffer(shapes.normals),
-                    buffer(shapes.tangents), buffer(shapes.bitangents), buffer(shapes.coordinates), positions, shapes.stones)
+        func buffers(_ shapes: TraceGeometry) -> Geometry {
+            (buffer(shapes.nodes), buffer(shapes.triangles), buffer(shapes.indices), buffer(shapes.normals),
+             buffer(shapes.tangents), buffer(shapes.bitangents), buffer(shapes.coordinates), buffer(shapes.positions), shapes.stones)
+        }
+        let geometry = buffers(shapes), liftedGeometry = buffers(lifted)
+        self.geometry = geometry
+        self.liftedGeometry = liftedGeometry
         #if !targetEnvironment(simulator)
-        buildShapes(shapes, positions: positions)
+        self.shapes = buildShapes(shapes, positions: geometry.positions)
+        liftedShapes = buildShapes(lifted, positions: liftedGeometry.positions)
+        instances = (0..<3).compactMap { _ in
+            device.makeBuffer(length: MemoryLayout<MTLAccelerationStructureInstanceDescriptor>.stride * self.shapes.count,
+                              options: .storageModeShared)
+        }
         #endif
         stillFrames = 0
         previousPlaces = []
@@ -345,15 +377,15 @@ final class PathTracer {
 
     #if !targetEnvironment(simulator)
     /// Builds each stone's triangles into a structure the GPU's ray tracing hardware searches.
-    private func buildShapes(_ shapes: TraceGeometry, positions: MTLBuffer) {
+    private func buildShapes(_ shapes: TraceGeometry, positions: MTLBuffer) -> [MTLAccelerationStructure] {
         guard let queue = device.makeCommandQueue(), let commands = queue.makeCommandBuffer(),
-              let encoder = commands.makeAccelerationStructureCommandEncoder() else { return }
+              let encoder = commands.makeAccelerationStructureCommandEncoder() else { return [] }
         var built: [MTLAccelerationStructure] = []
         var held: [MTLBuffer] = []
         for stone in shapes.stones {
             let range = Int(stone.first) * 3 ..< Int(stone.first + stone.count) * 3
             let local = shapes.indices[range].map { $0 - stone.vertexBase }
-            guard let indexBuffer = local.withUnsafeBytes({ device.makeBuffer(bytes: $0.baseAddress!, length: $0.count) }) else { return }
+            guard let indexBuffer = local.withUnsafeBytes({ device.makeBuffer(bytes: $0.baseAddress!, length: $0.count) }) else { return [] }
             let triangles = MTLAccelerationStructureTriangleGeometryDescriptor()
             triangles.vertexBuffer = positions
             triangles.vertexBufferOffset = Int(stone.vertexBase) * MemoryLayout<SIMD4<Float>>.stride
@@ -367,7 +399,7 @@ final class PathTracer {
             descriptor.geometryDescriptors = [triangles]
             let sizes = device.accelerationStructureSizes(descriptor: descriptor)
             guard let structure = device.makeAccelerationStructure(size: sizes.accelerationStructureSize),
-                  let scratch = device.makeBuffer(length: max(sizes.buildScratchBufferSize, 16), options: .storageModePrivate) else { return }
+                  let scratch = device.makeBuffer(length: max(sizes.buildScratchBufferSize, 16), options: .storageModePrivate) else { return [] }
             encoder.build(accelerationStructure: structure, descriptor: descriptor, scratchBuffer: scratch, scratchBufferOffset: 0)
             built.append(structure)
             held += [indexBuffer, scratch]
@@ -376,14 +408,12 @@ final class PathTracer {
         commands.commit()
         commands.waitUntilCompleted()
         _ = held
-        self.shapes = built
-        instances = (0..<3).compactMap { _ in
-            device.makeBuffer(length: MemoryLayout<MTLAccelerationStructureInstanceDescriptor>.stride * built.count, options: .storageModeShared)
-        }
+        return built
     }
 
     /// Builds where the three stones stand into the structure the ray tracing hardware searches first.
     private func encodeScene(_ stones: [TraceStone], commands: MTLCommandBuffer) -> MTLAccelerationStructure? {
+        let shapes = traced.shapes
         guard shapes.count == stones.count, !shapes.isEmpty, !instances.isEmpty else { return nil }
         let buffer = instances[instanceTurn]
         instanceTurn = (instanceTurn + 1) % instances.count
@@ -421,7 +451,12 @@ final class PathTracer {
     /// The stones where `transforms` put them, for the shaders.
     func stones(_ transforms: [simd_float4x4]) -> [TraceStone] {
         guard let geometry else { return [] }
-        return zip(geometry.stones, transforms).enumerated().map { k, pair in
+        return stones(transforms, of: geometry)
+    }
+
+    /// The stones of `geometry` where `transforms` put them: where to find each one's triangles in it.
+    private func stones(_ transforms: [simd_float4x4], of geometry: Geometry) -> [TraceStone] {
+        zip(geometry.stones, transforms).enumerated().map { k, pair in
             let (stone, toWorld) = pair
             let middle = (stone.lower + stone.upper) / 2
             let world = toWorld * SIMD4(middle, 1)
@@ -437,12 +472,20 @@ final class PathTracer {
     /// back (0 starts over), so it follows the change without starting from noise. `samples` is how many
     /// samples each pixel takes this frame. Where MetalFX can, it keeps up with the stones while they move;
     /// once they've been still a moment, the full picture takes over and is refined until it settles, as
-    /// MetalFX's is softer, with faint dark rims along the stones' edges.
+    /// MetalFX's is softer, with faint dark rims along the stones' edges. Once the light is worked out, the
+    /// picture goes straight into `screen` instead, if given; whether it did.
+    @discardableResult
     func encode(_ uniforms: TraceUniforms, stones: [TraceStone], changed: UInt32, region: (x: Range<Int>, y: Range<Int>), samples: UInt32,
-                bounces: UInt32, commands: MTLCommandBuffer, background: MTLTexture, grain: MTLTexture?, blank: MTLTexture) {
+                bounces: UInt32, commands: MTLCommandBuffer, background: MTLTexture, screen: MTLTexture? = nil, grain: MTLTexture?,
+                blank: MTLTexture) -> Bool {
         guard geometry != nil else {
             encodeOpen(uniforms, commands: commands, background: background, grain: grain, blank: blank)
-            return
+            return false
+        }
+        var stones = stones
+        if tracesLifted, let liftedGeometry {
+            // Where to find each stone's triangles among its lifted shapes.
+            stones = self.stones(stones.map(\.toWorld), of: liftedGeometry)
         }
         defer {
             // A piece or two of the light being worked out, after this frame's own work.
@@ -485,13 +528,14 @@ final class PathTracer {
         // With the light carried over, there's nothing to add up: a frame is as exact as it gets.
         drewBaked = isBaked && stones.count == 3
         if drewBaked {
-            encodeBaked(uniforms, stones: stones, light: light, structure: structure, commands: commands, background: background,
+            // Every frame is drawn whole, so straight onto the screen, if there is one, with no copy to make.
+            encodeBaked(uniforms, stones: stones, light: light, structure: structure, commands: commands, background: screen ?? background,
                         grain: grain, blank: blank)
             refining = false
-            return
+            return screen != nil
         }
         guard let map = encodeGroundMap(uniforms, stones: stones, commands: commands, structure: structure),
-              let backdrop = encodeBackdrop(uniforms, map: map, light: light, commands: commands) else { return }
+              let backdrop = encodeBackdrop(uniforms, map: map, light: light, commands: commands) else { return false }
 
         #if !targetEnvironment(simulator)
         if usesFX {
@@ -507,12 +551,13 @@ final class PathTracer {
                     stillFrames = 0
                     hold(background, commands: commands)
                 }
-                return
+                return false
             }
         }
         #endif
         encodeTraced(uniforms, stones: stones, before: before, structure: structure, map: map, backdrop: backdrop,
                      commands: commands, background: background, grain: grain, blank: blank)
+        return false
     }
 
     /// The stones' rectangle traced at full resolution, each pixel's samples averaged, and drawn over the
@@ -520,7 +565,7 @@ final class PathTracer {
     private func encodeTraced(_ uniforms: TraceUniforms, stones: [TraceStone], before: [TraceStone], structure: MTLAccelerationStructure?,
                               map: MTLTexture, backdrop: MTLTexture, commands: MTLCommandBuffer, background: MTLTexture,
                               grain: MTLTexture?, blank: MTLTexture) {
-        guard let geometry else { return }
+        guard let geometry = traced.geometry else { return }
         var uniforms = uniforms
         let columns = Int(uniforms.regionWidth), rows = Int(uniforms.regionHeight)
         if columns != regionSize.width || rows != regionSize.height || history.isEmpty {
@@ -553,7 +598,7 @@ final class PathTracer {
             #if !targetEnvironment(simulator)
             if let structure {
                 encoder.setAccelerationStructure(structure, bufferIndex: 16)
-                for shape in shapes {
+                for shape in traced.shapes {
                     encoder.useResource(shape, usage: .read)
                 }
             }
@@ -674,24 +719,11 @@ final class PathTracer {
     private func encodeBackdrop(_ uniforms: TraceUniforms, map: MTLTexture, light: [Float], commands: MTLCommandBuffer) -> MTLTexture? {
         let width = Int(uniforms.viewSize.x), height = Int(uniforms.viewSize.y)
         if backdrop?.width != width || backdrop?.height != height {
-            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: width, height: height, mipmapped: false)
-            d.usage = [.shaderRead, .shaderWrite]
-            d.storageMode = .private
-            backdrop = device.makeTexture(descriptor: d)
-            mist = device.makeTexture(descriptor: d)
-            mistLight = []
+            backdrop = screenMap(width: width, height: height)
         }
-        guard let backdrop, let mist else { return nil }
+        guard let backdrop, let mist = encodeMist(uniforms, light: light, commands: commands) else { return nil }
         var whole = uniforms
         let grid = MTLSize(width: width, height: height, depth: 1), group = MTLSize(width: 8, height: 8, depth: 1)
-        if light != mistLight, let encoder = commands.makeComputeCommandEncoder() {
-            mistLight = light
-            encoder.setComputePipelineState(mistPipeline)
-            encoder.setBytes(&whole, length: MemoryLayout<TraceUniforms>.stride, index: 0)
-            encoder.setTexture(mist, index: 0)
-            encoder.dispatchThreads(grid, threadsPerThreadgroup: group)
-            encoder.endEncoding()
-        }
         if let encoder = commands.makeComputeCommandEncoder() {
             encoder.setComputePipelineState(backdropFX)
             encoder.setBytes(&whole, length: MemoryLayout<TraceUniforms>.stride, index: 0)
@@ -704,11 +736,39 @@ final class PathTracer {
         return backdrop
     }
 
+    /// The mist along each pixel's line of sight, worked out again only when the light changes.
+    private func encodeMist(_ uniforms: TraceUniforms, light: [Float], commands: MTLCommandBuffer) -> MTLTexture? {
+        let width = Int(uniforms.viewSize.x), height = Int(uniforms.viewSize.y)
+        if mist?.width != width || mist?.height != height {
+            mist = screenMap(width: width, height: height)
+            mistLight = []
+        }
+        guard let mist else { return nil }
+        if light != mistLight, let encoder = commands.makeComputeCommandEncoder() {
+            mistLight = light
+            var whole = uniforms
+            encoder.setComputePipelineState(mistPipeline)
+            encoder.setBytes(&whole, length: MemoryLayout<TraceUniforms>.stride, index: 0)
+            encoder.setTexture(mist, index: 0)
+            encoder.dispatchThreads(MTLSize(width: width, height: height, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+            encoder.endEncoding()
+        }
+        return mist
+    }
+
+    /// A texture the size of the screen to work light out into and read it back from.
+    private func screenMap(width: Int, height: Int) -> MTLTexture? {
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: width, height: height, mipmapped: false)
+        d.usage = [.shaderRead, .shaderWrite]
+        d.storageMode = .private
+        return device.makeTexture(descriptor: d)
+    }
+
     /// Adds a sample to every texel of the ground's light map, carried on from the last frame as far as
     /// `uniforms.limit` says. The map to read this frame.
     private func encodeGroundMap(_ uniforms: TraceUniforms, stones: [TraceStone], commands: MTLCommandBuffer,
                                  structure: MTLAccelerationStructure?) -> MTLTexture? {
-        guard let geometry else { return nil }
+        guard let geometry = traced.geometry else { return nil }
         if groundMaps.isEmpty {
             let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: Self.groundMapSize,
                                                              height: Self.groundMapSize, mipmapped: false)
@@ -733,7 +793,7 @@ final class PathTracer {
         #if !targetEnvironment(simulator)
         if let structure {
             encoder.setAccelerationStructure(structure, bufferIndex: 16)
-            for shape in shapes {
+            for shape in traced.shapes {
                 encoder.useResource(shape, usage: .read)
             }
         }
@@ -763,7 +823,7 @@ final class PathTracer {
             fx = makeFX(width: width, height: height, outputWidth: outputWidth, outputHeight: outputHeight)
             reset = true
         }
-        guard let fx, let geometry else { return }
+        guard let fx, let geometry = traced.geometry else { return }
 
         let screenUniforms = uniforms
         // The stones' rectangle as a view of its own, at half the resolution, each frame's samples from
@@ -790,7 +850,7 @@ final class PathTracer {
             #if !targetEnvironment(simulator)
             if let structure {
                 encoder.setAccelerationStructure(structure, bufferIndex: 16)
-                for shape in shapes {
+                for shape in traced.shapes {
                     encoder.useResource(shape, usage: .read)
                 }
             }
@@ -920,8 +980,9 @@ final class PathTracer {
     }
 
     /// The stones' shapes and where they are, `stones`, for a kernel that traces rays among them.
-    private func bindGeometry(_ encoder: MTLComputeCommandEncoder, stones: [TraceStone], structure: MTLAccelerationStructure?) {
-        guard let geometry else { return }
+    private func bindGeometry(_ encoder: MTLComputeCommandEncoder, stones: [TraceStone], structure: MTLAccelerationStructure?,
+                              lifted: Bool = false) {
+        guard let geometry = lifted ? liftedGeometry : geometry else { return }
         var now = stones
         while now.count < 3 { now.append(Self.absent) }
         encoder.setBytes(&now, length: MemoryLayout<TraceStone>.stride * 3, index: 1)
@@ -933,7 +994,7 @@ final class PathTracer {
         #if !targetEnvironment(simulator)
         if let structure {
             encoder.setAccelerationStructure(structure, bufferIndex: 16)
-            for shape in shapes {
+            for shape in lifted ? liftedShapes : shapes {
                 encoder.useResource(shape, usage: .read)
             }
         }
@@ -958,7 +1019,7 @@ final class PathTracer {
     /// `stoneAlbedo` of the light that falls on them. It's done a piece a frame, so the scene keeps
     /// moving meanwhile, and kept on disk for next time. Then `done`.
     func bake(poses: [[TraceStone]], stoneAlbedo: Float, done: @escaping @MainActor () -> Void) {
-        guard let geometry, !isBaking, transfers.isEmpty, poses.count == 3, poses.allSatisfy({ $0.count == 3 }) else { return }
+        guard let geometry, let liftedGeometry, !isBaking, transfers.isEmpty, poses.count == 3, poses.allSatisfy({ $0.count == 3 }) else { return }
         let key = bakeKey(poses: poses, stoneAlbedo: stoneAlbedo)
         if let kept = loadBake(key) {
             transfers = kept
@@ -970,7 +1031,11 @@ final class PathTracer {
         let triangleCount = UInt32(geometry.stones.reduce(0) { max($0, Int($1.first + $1.count)) })
         var steps: [(MTLCommandBuffer) -> Void] = []
         var results: [(stones: MTLBuffer, ground: MTLBuffer)] = []
-        for pose in poses {
+        for (index, pose) in poses.enumerated() {
+            // Resting, the stones sit on their seats; paused and focusing, they're lifted off them.
+            let lifted = index > 0
+            let shape = lifted ? liftedGeometry : geometry
+            let pose = lifted ? stones(pose.map(\.toWorld), of: liftedGeometry) : pose
             guard let s0 = device.makeBuffer(length: stoneBytes, options: .storageModePrivate),
                   let s1 = device.makeBuffer(length: stoneBytes, options: .storageModePrivate),
                   let g0 = device.makeBuffer(length: groundBytes, options: .storageModePrivate),
@@ -978,7 +1043,7 @@ final class PathTracer {
             let resting = Resting()
             #if !targetEnvironment(simulator)
             steps.append { [weak self] commands in
-                self?.buildResting(pose, into: resting, commands: commands)
+                self?.buildResting(pose, into: resting, commands: commands, lifted: lifted)
             }
             #endif
             var stonesBefore = s0, stonesAfter = s1, groundBefore = g0, groundAfter = g1
@@ -995,7 +1060,7 @@ final class PathTracer {
                         guard let self, let encoder = commands.makeComputeCommandEncoder() else { return }
                         encoder.setComputePipelineState(bakeStones)
                         encoder.setBytes(&settings, length: MemoryLayout<BakeSettings>.stride, index: 0)
-                        bindGeometry(encoder, stones: pose, structure: resting.structure)
+                        bindGeometry(encoder, stones: pose, structure: resting.structure, lifted: lifted)
                         encoder.setBuffer(harmonicScale, offset: 0, index: 17)
                         encoder.setBuffer(before, offset: 0, index: 18)
                         encoder.setBuffer(groundSeen, offset: 0, index: 19)
@@ -1014,7 +1079,7 @@ final class PathTracer {
                         guard let self, let encoder = commands.makeComputeCommandEncoder() else { return }
                         encoder.setComputePipelineState(bakeGround)
                         encoder.setBytes(&settings, length: MemoryLayout<BakeSettings>.stride, index: 0)
-                        bindGeometry(encoder, stones: pose, structure: resting.structure)
+                        bindGeometry(encoder, stones: pose, structure: resting.structure, lifted: lifted)
                         encoder.setBuffer(harmonicScale, offset: 0, index: 17)
                         encoder.setBuffer(before, offset: 0, index: 18)
                         encoder.setBuffer(groundMade, offset: 0, index: 20)
@@ -1035,8 +1100,8 @@ final class PathTracer {
                 encoder.setComputePipelineState(fillBuried)
                 encoder.setBytes(&triangles, length: MemoryLayout<UInt32>.stride, index: 0)
                 encoder.setBytes(&now, length: MemoryLayout<TraceStone>.stride * 3, index: 1)
-                encoder.setBuffer(geometry.indices, offset: 0, index: 5)
-                encoder.setBuffer(geometry.positions, offset: 0, index: 15)
+                encoder.setBuffer(shape.indices, offset: 0, index: 5)
+                encoder.setBuffer(shape.positions, offset: 0, index: 15)
                 encoder.setBytes(&bases, length: MemoryLayout<SIMD4<UInt32>>.stride, index: 19)
                 encoder.setBuffer(kept.stones, offset: 0, index: 20)
                 encoder.dispatchThreads(MTLSize(width: Int(triangles), height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
@@ -1065,7 +1130,8 @@ final class PathTracer {
     #if !targetEnvironment(simulator)
     /// Builds the stones resting as `stones` into a structure the ray tracing hardware searches, into
     /// `resting`, ahead of the work in `commands` that uses it.
-    private func buildResting(_ stones: [TraceStone], into resting: Resting, commands: MTLCommandBuffer) {
+    private func buildResting(_ stones: [TraceStone], into resting: Resting, commands: MTLCommandBuffer, lifted: Bool) {
+        let shapes = lifted ? liftedShapes : shapes
         guard shapes.count == stones.count, !shapes.isEmpty,
               let buffer = device.makeBuffer(length: MemoryLayout<MTLAccelerationStructureInstanceDescriptor>.stride * stones.count,
                                              options: .storageModeShared) else { return }
@@ -1105,7 +1171,7 @@ final class PathTracer {
                 hash = (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01b3
             }
         }
-        if let geometry {
+        for geometry in [geometry, liftedGeometry].compactMap({ $0 }) {
             mix(UnsafeRawBufferPointer(start: geometry.positions.contents(), count: geometry.positions.length))
         }
         for pose in poses {
@@ -1177,7 +1243,7 @@ final class PathTracer {
     /// screen shows it, into `background`.
     private func encodeBaked(_ uniforms: TraceUniforms, stones: [TraceStone], light: [Float], structure: MTLAccelerationStructure?,
                              commands: MTLCommandBuffer, background: MTLTexture, grain: MTLTexture?, blank: MTLTexture) {
-        guard let geometry, transfers.count == 3 else { return }
+        guard let geometry, let liftedGeometry, transfers.count == 3 else { return }
         var uniforms = uniforms
         let from = transfers[min(max(poseBlend.from, 0), 2)], to = transfers[min(max(poseBlend.to, 0), 2)]
         var blend = min(max(poseBlend.progress, 0), 1)
@@ -1211,13 +1277,17 @@ final class PathTracer {
 
         encoder.setComputePipelineState(stoneLight)
         encoder.setBytes(&uniforms, length: MemoryLayout<TraceUniforms>.stride, index: 0)
-        bindGeometry(encoder, stones: stones, structure: structure)
+        bindGeometry(encoder, stones: stones, structure: structure, lifted: tracesLifted)
         packed.withUnsafeBytes { encoder.setBytes($0.baseAddress!, length: $0.count, index: 17) }
         encoder.setBuffer(from.stones, offset: 0, index: 18)
         encoder.setBytes(&bases, length: MemoryLayout<SIMD4<UInt32>>.stride, index: 19)
         encoder.setBuffer(vertexLight, offset: 0, index: 20)
         encoder.setBuffer(to.stones, offset: 0, index: 21)
         encoder.setBytes(&blend, length: MemoryLayout<Float>.stride, index: 22)
+        encoder.setBuffer(liftedGeometry.positions, offset: 0, index: 23)
+        encoder.setBuffer(liftedGeometry.normals, offset: 0, index: 24)
+        var lifted = (0..<3).map { $0 < shapeBlend.count ? shapeBlend[$0] : 0 }
+        encoder.setBytes(&lifted, length: MemoryLayout<Float>.stride * 3, index: 25)
         encoder.dispatchThreads(MTLSize(width: vertexCount, height: 1, depth: 1), threadsPerThreadgroup: line)
 
         encoder.setComputePipelineState(groundHarmonics)
@@ -1230,7 +1300,7 @@ final class PathTracer {
 
         encoder.setComputePipelineState(groundKey)
         encoder.setBytes(&uniforms, length: MemoryLayout<TraceUniforms>.stride, index: 0)
-        bindGeometry(encoder, stones: stones, structure: structure)
+        bindGeometry(encoder, stones: stones, structure: structure, lifted: tracesLifted)
         encoder.setTexture(bakedMaps.key, index: 0)
         encoder.dispatchThreads(MTLSize(width: size, height: size, depth: 1), threadsPerThreadgroup: square)
 
@@ -1244,7 +1314,7 @@ final class PathTracer {
         encoder.dispatchThreads(MTLSize(width: Self.groundMapSize, height: Self.groundMapSize, depth: 1), threadsPerThreadgroup: square)
         encoder.endEncoding()
 
-        guard let backdrop = encodeBackdrop(uniforms, map: bakedMaps.map, light: light, commands: commands),
+        guard let mist = encodeMist(uniforms, light: light, commands: commands),
               let targets = stoneTargets(width: Int(uniforms.regionWidth), height: Int(uniforms.regionHeight)) else { return }
 
         // The stones, four samples a pixel, kept only as each pixel's average.
@@ -1261,10 +1331,13 @@ final class PathTracer {
         if let encoder = commands.makeRenderCommandEncoder(descriptor: drawing) {
             encoder.setRenderPipelineState(stoneRaster)
             encoder.setDepthStencilState(stoneDepth)
-            encoder.setCullMode(.none)
+            // Each stone is closed, its triangles counterclockwise seen from outside, so the inside of a
+            // stone, facing away, needn't be drawn.
+            encoder.setFrontFacing(.counterClockwise)
+            encoder.setCullMode(.back)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<TraceUniforms>.stride, index: 0)
             for (index, buffer) in [geometry.positions, geometry.normals, geometry.tangents, geometry.bitangents,
-                                    geometry.coordinates, vertexLight].enumerated() {
+                                    geometry.coordinates, vertexLight, liftedGeometry.positions, liftedGeometry.normals].enumerated() {
                 encoder.setVertexBuffer(buffer, offset: 0, index: 2 + index)
             }
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<TraceUniforms>.stride, index: 0)
@@ -1276,6 +1349,7 @@ final class PathTracer {
             for (k, stone) in stones.enumerated() {
                 var toWorld = stone.toWorld
                 encoder.setVertexBytes(&toWorld, length: MemoryLayout<simd_float4x4>.stride, index: 1)
+                encoder.setVertexBytes(&lifted[k], length: MemoryLayout<Float>.stride, index: 10)
                 let shape = geometry.stones[k]
                 encoder.drawIndexedPrimitives(type: .triangle, indexCount: Int(shape.count) * 3, indexType: .uint32,
                                               indexBuffer: geometry.indices, indexBufferOffset: Int(shape.first) * 3 * MemoryLayout<UInt32>.stride)
@@ -1288,11 +1362,12 @@ final class PathTracer {
         pass.colorAttachments[0].loadAction = .dontCare
         pass.colorAttachments[0].storeAction = .store
         if let encoder = commands.makeRenderCommandEncoder(descriptor: pass) {
-            encoder.setRenderPipelineState(bakedDisplay)
+            encoder.setRenderPipelineState(bakedScene)
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<TraceUniforms>.stride, index: 0)
-            encoder.setFragmentTexture(backdrop, index: 0)
-            encoder.setFragmentTexture(targets.color, index: 1)
-            encoder.setFragmentTexture(grain ?? blank, index: 2)
+            encoder.setFragmentTexture(mist, index: 0)
+            encoder.setFragmentTexture(bakedMaps.map, index: 1)
+            encoder.setFragmentTexture(targets.color, index: 2)
+            encoder.setFragmentTexture(grain ?? blank, index: 3)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             encoder.endEncoding()
         }

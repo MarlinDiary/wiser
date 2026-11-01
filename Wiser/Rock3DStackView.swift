@@ -58,13 +58,21 @@ struct Rock3DStackView: View {
 @MainActor
 final class Rock3DScene {
     /// The 2D stack is drawn at this scale on the home screen; the 3D view matches it.
-    static let viewScale: CGFloat = 0.66
+    nonisolated static let viewScale: CGFloat = 0.66
     /// Extra room above and below the stack, in points.
-    static let margin: CGFloat = 40
-    static let fieldOfView: Float = 22
+    nonisolated static let margin: CGFloat = 40
+    nonisolated static let fieldOfView: Float = 22
     // One point of the original artwork is one millimeter in the scene.
-    static let metersPerPoint: Float = 0.001
-    private static let stackHeight: Float = 364
+    nonisolated static let metersPerPoint: Float = 0.001
+    private nonisolated static let stackHeight: Float = 364
+
+    /// Where the camera is, in points of the artwork: in front of the stack, level with its middle, as far
+    /// back as it takes for the stack's height at `viewScale`, plus `margin` above and below, to fill the
+    /// view.
+    nonisolated static var eye: SIMD3<Float> {
+        let viewHeight = stackHeight * Float(viewScale) + 2 * Float(margin)
+        return [0, stackHeight / 2, viewHeight / Float(viewScale) / 2 / tan(fieldOfView / 2 * .pi / 180)]
+    }
 
     /// Where the camera is and which way it looks, as the transform from its own frame to the world's: it
     /// looks along its -z, with its x to the right and its y up.
@@ -100,6 +108,29 @@ final class Rock3DScene {
     var pebbles: [Pebble] {
         layout?.pebbles ?? []
     }
+    /// The stones' shapes once lifted off their seats.
+    var liftedPebbles: [Pebble] {
+        layout?.lifted ?? []
+    }
+
+    /// How far each stone has taken on its lifted shape: none while it rests, all of it once it has risen
+    /// off the stone below by as much as its seat is deep, so on the way it never passes into that stone;
+    /// little at first, while it's still close and the camera sees it from higher above. The bottom stone
+    /// straightens up as the middle one rises off it, as far as there's room.
+    func shapeBlends() -> [Float] {
+        guard let layout else { return [] }
+        let resting = layout.poses[.idle]!
+        func rise(_ k: Int) -> Float {
+            (glides[k].position.y - resting[k].translation.y) - (glides[k - 1].position.y - resting[k - 1].translation.y)
+        }
+        return glides.indices.map { k in
+            guard k > 0 else { return layout.straightened(rise: rise(1)) }
+            let depth = layout.seatDepths[k]
+            guard depth > 0 else { return 0 }
+            let share = min(1, max(0, rise(k) / depth))
+            return share * share
+        }
+    }
 
     /// Where each stone is now, as the transform from its own frame (meters) to the world's.
     func stoneTransforms() -> [simd_float4x4] {
@@ -132,13 +163,8 @@ final class Rock3DScene {
     private var isPreparing = false
 
     init() {
-        let s = Self.metersPerPoint
-        // The view is the stack's height at `viewScale`, plus `margin` above and below, seen straight on
-        // from in front, level with the middle of the stack.
-        let viewHeight = Self.stackHeight * Float(Self.viewScale) + 2 * Float(Self.margin)
-        let worldHeight = viewHeight / Float(Self.viewScale) * s
-        let distance = worldHeight / 2 / tan(Self.fieldOfView / 2 * .pi / 180)
-        camera = simd_float4x4(columns: ([1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, Self.stackHeight / 2 * s, distance, 1]))
+        // Seen straight on from `eye`.
+        camera = simd_float4x4(columns: ([1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], SIMD4(Self.eye * Self.metersPerPoint, 1)))
     }
 
     /// Builds the stones and works out how they sit; the heavy part runs off the main thread.
@@ -188,6 +214,8 @@ final class Rock3DScene {
     /// and swings back to face the front.
     func endDrag(speed: Float) {
         dragStart = nil
+        // Back to the nearest front, not all the way round however many turns it was dragged.
+        turn = remainder(turn, 2 * .pi)
         turnSpeed = max(-12, min(12, speed / 110))
         onWake?()
     }
@@ -588,7 +616,16 @@ nonisolated struct StoneLayout: Sendable {
     /// How deep the bottom stone is bedded into the ground, in points.
     static let bed: Float = 8
 
+    /// The stones as they rest, each upper one with its seat.
     let pebbles: [Pebble]
+    /// The stones once lifted off what they rest on: the same points, some of them moved.
+    let lifted: [Pebble]
+    /// How deep each stone's seat is, in points (none for the stones that keep their shape): it has risen
+    /// this far off the stone below by the time it has taken its whole lifted shape.
+    let seatDepths: [Float]
+    /// How far the middle stone has risen off the bottom one by the time the bottom one has straightened up
+    /// by each of a few even steps, from leaning back as it rests to upright.
+    let straightening: [Float]
     let poses: [RockState: [StoneStack.Pose]]
     /// Where each stone stands when the stack is at rest.
     let footings: [StoneStack.Footing]
@@ -599,13 +636,14 @@ nonisolated struct StoneLayout: Sendable {
         // Flat pebbles, a little deeper than they are tall, a bit thinner behind than in front, with
         // gently uneven faces and edges. Half thicknesses in front of the outline, in points. The bottom
         // stone's outline bulges out at its corners, so it's filled out smoothly, with its tightest turns
-        // worn a little; the others are full right out to their ends.
+        // worn a little; the others are full right out to their ends, eased toward smooth enough that
+        // turned round they show no edges where their outlines bulge.
         let thicknesses: [Float] = [81, 125, 60]
         var pebbles: [Pebble] = []
         for (k, name) in Self.names.enumerated() {
             let front = thicknesses[k]
             let shape = Pebble.Shape(front: front, back: front * 0.85, bumpiness: 0.05, wander: 0.12, wear: k == 0 ? 3 : 0,
-                                     inflation: k == 0 ? .membrane : .rays, seed: UInt64(k + 1))
+                                     inflation: k == 0 ? .membrane : .rays(smoothed: 0.6), seed: UInt64(k + 1))
             guard let pebble = Pebble(imageName: name, shape: shape) else { return nil }
             pebbles.append(pebble)
         }
@@ -629,16 +667,153 @@ nonisolated struct StoneLayout: Sendable {
             .checked: [bottom, pose(frameBottom: 111, frameHeight: 136, depth: 6, tilt: 0), pose(frameBottom: 280, frameHeight: 84, depth: 10, tilt: 0)],
         ]
 
+        // In the drawing the middle stone's lower edge hangs in front of the top of the stone below. For that
+        // to hold here, with the seat it rests on (below) out of sight under it rather than cutting into its
+        // outline, the top of the stone below has to sit well behind that edge. So the bottom stone leans
+        // back, each point moving away along its own line of sight, more the higher it is, so from the front
+        // it looks exactly as drawn. (Bringing the upper stones nearer looks the same from the front too, but
+        // then the stack leans forward when it's turned side on.)
+        let eye = Rock3DScene.eye
+        let upright = pebbles[0]
+        pebbles[0] = pebbles[0].leaning(back: 45, seenFrom: eye - bottom.translation)
+
         // The drawn stack overlaps the stones. So that they rest on each other instead of passing into
-        // each other, each upper stone has a seat worn into its underside that fits the stone below.
+        // each other, each upper stone has a seat worn into its underside that fits the stone below, eased
+        // out wide enough that turned round, or floating, it shows no sharp lip. The middle stone's is out of
+        // sight from in front, so it eases out further behind; the top stone's shows, so it eases out a
+        // little wider all round, its lower edge from the front a little rounder for it.
         let resting = poses[.idle]!
+        let unseated = pebbles
         for k in 1..<pebbles.count {
-            pebbles[k] = pebbles[k].seated(at: resting[k], on: Self.stone(pebbles[k - 1]), at: resting[k - 1], blend: 24)
+            pebbles[k] = pebbles[k].seated(at: resting[k], on: Self.stone(pebbles[k - 1]), at: resting[k - 1],
+                                           blend: k == 1 ? 24 : 36, behind: k == 1 ? 72 : 0)
         }
+        // Off its seat, the middle stone's underside fills back in wherever that can't be seen from in front,
+        // so while it floats it's a whole pebble from round about and looks just the same from in front. It
+        // fills in as it rises (see `Rock3DScene.shapeBlends`), so it never passes into the stone below: by
+        // the time it has taken its whole lifted shape, it has risen as far as its seat is deep. The top
+        // stone's seat stays: floating above the camera, most of it shows from in front. Then the bottom
+        // stone straightens up, only as fast as the middle one leaves room for it.
+        var lifted = pebbles
+        var seatDepths = [Float](repeating: 0, count: pebbles.count)
+        seatDepths[1] = zip(pebbles[1].surface.positions, unseated[1].surface.positions).map { $0.y - $1.y }.max() ?? 0
+        func risen(by height: Float) -> StoneStack.Pose {
+            var pose = resting[1]
+            pose.translation.y += height
+            return pose
+        }
+        let depth = seatDepths[1], floating = poses[.checked]![1].translation.y - resting[1].translation.y
+        let seen: [(pose: StoneStack.Pose, share: Float)] = [Float(0.25), 0.5, 0.75, 1].map { (risen(by: depth * $0), $0 * $0) }
+            + [(risen(by: (depth + floating) / 2), 1), (poses[.paused]![1], 1), (poses[.checked]![1], 1)]
+        lifted[1] = pebbles[1].regrown(from: unseated[1], shares: Self.regrowth(of: pebbles[1], unseated: unseated[1], seen: seen, from: eye))
+        lifted[0] = upright
+        straightening = Self.straightening(of: pebbles[0], into: upright, at: resting[0], under: lifted[1], at: resting[1].translation,
+                                           tilts: [resting[1].rotation, poses[.paused]![1].rotation], from: depth,
+                                           to: poses[.paused]![1].translation.y - resting[1].translation.y)
+        self.seatDepths = seatDepths
+        self.lifted = lifted
         self.pebbles = pebbles
         self.poses = poses
         footings = StoneStack.footings(of: pebbles.map(Self.stone), at: resting)
         reaches = pebbles.map { pebble in pebble.surface.positions.map { length(SIMD2($0.x, $0.y)) }.max() ?? 1 }
+    }
+
+    /// How far the bottom stone has straightened up, from 0 to 1, with the middle stone risen `rise` off it.
+    func straightened(rise: Float) -> Float {
+        let steps = straightening.count - 1
+        guard steps > 0, rise > straightening[0] else { return 0 }
+        guard let next = straightening.firstIndex(where: { $0 > rise }) else { return 1 }
+        let low = straightening[next - 1], high = straightening[next]
+        return (Float(next - 1) + (rise - low) / (high - low)) / Float(steps)
+    }
+
+    /// How far the middle stone is to have risen off the bottom one by the time the bottom one has straightened
+    /// up from `leaning` towards `upright` by each of `steps` even steps: evenly from `start`, by when the
+    /// middle one has its whole lifted shape, `middle` (the lowest its underside gets), to `end`; but later
+    /// wherever it takes longer for the middle one, at `place` and turned any of the ways `tilts` turn it, to
+    /// be a point clear of the bottom one, at `pose`.
+    private static func straightening(of leaning: Pebble, into upright: Pebble, at pose: StoneStack.Pose, under middle: Pebble,
+                                      at place: SIMD3<Float>, tilts: [simd_quatf], from start: Float, to end: Float,
+                                      steps: Int = 12) -> [Float] {
+        let undersides = tilts.map { tilt in
+            middle.surface.positions.map(StoneStack.Pose(rotation: tilt, translation: place).apply)
+        }
+        let from = leaning.surface.positions, to = upright.surface.positions
+        var needed: [Float] = []
+        for step in 0...steps {
+            let share = Float(step) / Float(steps)
+            let stone = StoneStack.Stone(positions: zip(from, to).map { $0 + ($1 - $0) * share }, indices: leaning.surface.indices,
+                                         mass: 0, centerOfMass: .zero)
+            let rise = undersides.map { StoneStack.lift($0, outOf: stone, at: pose, clearance: 1).max() ?? 0 }.max() ?? 0
+            needed.append(max(rise, needed.last ?? start))
+        }
+        // Not past a step until there's room for the next, so there's room all the way between them.
+        return needed.indices.map { max(needed[min($0 + 1, steps)], start + (end - start) * Float($0) / Float(steps)) }
+    }
+
+    /// How far each point of a seated stone can go back to where it was before its seat was worn in, from 0
+    /// to 1, once it's lifted off. Not at all where the seat hardly moved it in front of the plane its outline
+    /// was drawn in: some of those points show. Elsewhere, as far as keeps it above the stone's lower edge as
+    /// seen from `eye` with the stone seated, in each of `seen`: where the stone is, and how much of its
+    /// lifted shape it has taken there. So from in front it looks just as it does seated. Then eased, so
+    /// nothing steps.
+    private static func regrowth(of seated: Pebble, unseated: Pebble, seen: [(pose: StoneStack.Pose, share: Float)],
+                                 from eye: SIMD3<Float>) -> [Float] {
+        let start = seated.surface.positions, end = unseated.surface.positions, indices = seated.surface.indices
+        // Where a point shows from `eye`, in points across the plane of the stack.
+        func shown(_ point: SIMD3<Float>) -> SIMD2<Float> {
+            SIMD2(point.x - eye.x, point.y - eye.y) * (eye.z / (eye.z - point.z))
+        }
+        let column: Float = 0.25, margin: Float = 0.35
+        var shares = start.indices.map { length(end[$0] - start[$0]) < 2.5 && start[$0].z > -5 ? Float(0) : 1 }
+        for (pose, share) in seen {
+            // The stone's lower edge from there: the lowest its outline comes in each narrow column.
+            let points = start.map { shown(pose.apply($0)) }
+            let left = points.map(\.x).min()! - 2, count = Int((points.map(\.x).max()! + 2 - left) / column) + 1
+            let middle = shown(pose.apply(.zero)).y
+            var lowest = [Float](repeating: .infinity, count: count)
+            for t in stride(from: 0, to: indices.count, by: 3) {
+                // Only the lower half of the outline makes its lower edge.
+                guard (t..<(t + 3)).contains(where: { points[Int(indices[$0])].y < middle }) else { continue }
+                for (a, b) in [(t, t + 1), (t + 1, t + 2), (t + 2, t)] {
+                    let p = points[Int(indices[a])], q = points[Int(indices[b])]
+                    let steps = max(1, Int((length(q - p) / column).rounded(.up)))
+                    for s in 0...steps {
+                        let point = p + (q - p) * (Float(s) / Float(steps))
+                        let c = Int((point.x - left) / column)
+                        lowest[c] = min(lowest[c], point.y)
+                    }
+                }
+            }
+            func inside(_ point: SIMD3<Float>) -> Bool {
+                let at = shown(pose.apply(point))
+                let c = Int((at.x - left) / column)
+                guard c >= 2, c + 2 < count else { return false }
+                return at.y >= lowest[(c - 2)...(c + 2)].max()! + margin
+            }
+            for i in start.indices where shares[i] > 0 {
+                func fits(_ s: Float) -> Bool { inside(start[i] + (end[i] - start[i]) * (s * share)) }
+                guard !fits(shares[i]) else { continue }
+                var low: Float = 0, high = shares[i]
+                for _ in 0..<12 {
+                    let middle = (low + high) / 2
+                    if fits(middle) { low = middle } else { high = middle }
+                }
+                shares[i] = low
+            }
+        }
+        // Eased: what's left of the seat never drops by more than a point for every `ease` points from
+        // wherever more of it has to stay, so the underside comes down gently from there, without a step or
+        // a groove. Keeping more of the seat never shows from in front.
+        let ease: Float = 5
+        let depths = start.indices.map { length(end[$0] - start[$0]) }
+        let remaining = start.indices.map { depths[$0] * (1 - shares[$0]) }
+        let held = start.indices.filter { remaining[$0] > 0.05 }
+        return start.indices.map { i in
+            guard depths[i] > 0 else { return 0 }
+            let kept = held.reduce(remaining[i]) { max($0, remaining[$1] - length(start[i] - start[$1]) / ease) }
+            return 1 - min(depths[i], kept) / depths[i]
+        }
     }
 
     /// Whether the resting stack stands: every stone's weight, with what's above it, over the patch it

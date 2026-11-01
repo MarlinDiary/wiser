@@ -8,6 +8,8 @@
 	</array>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Wiser uses your location to work out sunrise and sunset times on your iPhone, so the sky follows your day.</string>
 </dict>
